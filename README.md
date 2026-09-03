@@ -1,8 +1,8 @@
 # google-seo-web.js
 
-Controlador local orientado a LLMs para Google Search Console, PageSpeed Insights e outras ferramentas de indexação e SEO. Usa uma sessão Chromium persistente, permite login manual diretamente na Google e expõe a página atual como texto e elementos interativos identificados.
+Controlador local orientado a LLMs para Google Search Console, PageSpeed Insights e outras ferramentas de indexação e SEO. Usa uma sessão Chromium persistente, permite login manual diretamente na Google e disponibiliza tanto controlo visual como endpoints semânticos para relatórios, tabelas completas, gráficos, notificações, CSV, indexação, sitemaps e inspeção de URLs.
 
-Esta é a primeira fase do projeto: controlo e descoberta da interface real. Os endpoints semânticos de desempenho, indexação, sitemaps e validações serão adicionados depois de os fluxos terem sido observados numa propriedade autenticada. Sempre que a Google disponibilizar uma API oficial, essa API terá prioridade sobre automação visual.
+O contrato HTTP completo, parâmetros e exemplos estão em [API.md](API.md).
 
 ## Segurança
 
@@ -29,6 +29,7 @@ Configuração opcional:
 |---|---:|---|
 | `GOOGLE_SEO_API_PORT` | `3100` | Porta HTTP local |
 | `GOOGLE_SEO_API_KEY` | vazio | Protege todos os endpoints com Bearer token |
+| `PAGESPEED_API_KEY` | vazio | Chave opcional recomendada para uso frequente da API PageSpeed |
 
 Quando existir uma chave:
 
@@ -113,6 +114,28 @@ Use `"submit": true` apenas quando pretende pressionar Enter depois da escrita.
 | `GET` | `/browser/screenshot` | `fullPage=true` opcional | PNG da página |
 | `POST` | `/browser/stop` | `{}` | Fecha o browser e preserva a sessão |
 
+Endpoints semânticos principais:
+
+| Método | Endpoint | Resultado |
+|---|---|---|
+| `GET` | `/search-console/reports` | Catálogo das áreas úteis da sidebar e URLs da propriedade |
+| `GET` | `/search-console/report` | Qualquer relatório por nome ou caminho interno |
+| `GET` | `/search-console/report.csv` | Tabela completa de qualquer relatório em CSV |
+| `GET` | `/search-console/performance` | Consultas, páginas, países, dispositivos, aparência ou dias |
+| `GET` | `/search-console/performance.csv` | Dimensão de Performance completa em CSV |
+| `GET` | `/search-console/graph` | Gráfico e série diária de Performance |
+| `GET` | `/search-console/time-gaps` | Dias em falta no intervalo selecionado |
+| `GET` | `/search-console/summary` | Resumo diário cruzado, pronto para LLM |
+| `GET` | `/search-console/notifications` | Mensagens do sino, incluindo total e não lidas |
+| `GET` | `/search-console/indexing` | Estado, motivos, validações e contagens de indexação |
+| `GET` | `/search-console/validations` | Alias orientado aos casos de validação |
+| `GET/POST` | `/search-console/url-inspection` | Inspeciona; opcionalmente testa ao vivo ou pede indexação |
+| `GET/POST` | `/search-console/sitemaps` | Lista ou submete um sitemap |
+| `POST` | `/search-console/control` | Clica ou escreve usando o rótulo estável do controlo |
+| `POST` | `/search-console/filter` | Alias semântico para operar filtros da interface |
+| `GET` | `/pagespeed/report` | Lighthouse, Core Web Vitals, auditorias e oportunidades |
+| `GET` | `/pagespeed/report.csv` | Todas as auditorias PageSpeed em CSV |
+
 Todos os pedidos `POST` exigem `Content-Type: application/json`, mesmo quando o corpo é `{}`. O limite é 100 kB.
 
 ## Serviços permitidos
@@ -133,21 +156,7 @@ Invoke-RestMethod http://127.0.0.1:3100/browser/open `
   -Body '{"target":"pagespeed"}'
 ```
 
-## Próximos endpoints semânticos
-
-Depois da descoberta autenticada, a camada específica será implementada nesta ordem:
-
-1. `GET /search-console/properties`
-2. `GET /search-console/performance` com consultas, páginas, países, dispositivos e datas
-3. `GET /search-console/indexing` e detalhe das causas de exclusão
-4. `GET /search-console/url-inspection?url=...`
-5. `GET /search-console/sitemaps`
-6. `POST /search-console/sitemaps` para submissão explícita
-7. `GET /search-console/validations` para casos em análise e falhados
-8. `GET /pagespeed/report?url=...&strategy=mobile|desktop`
-9. Um resumo cruzado, próprio para LLM, entre indexação, desempenho e Core Web Vitals
-
-Submeter sitemaps, iniciar validações e pedir indexação são operações com efeitos externos; terão endpoints separados das operações de leitura e respostas que indiquem exatamente o que foi enviado.
+As rotas `POST /search-console/sitemaps` e `POST /search-console/url-inspection` com `action=index` alteram estado externo. Os endpoints `GET` não submetem sitemaps, não iniciam testes e não pedem indexação.
 
 ## Uso como biblioteca
 

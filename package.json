@@ -1,6 +1,6 @@
 {
   "name": "google-seo-web.js",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local, LLM-oriented browser controller for Google Search Console and SEO tools",
   "main": "./index.js",
   "scripts": {
@@ -23,4 +23,3 @@
     "puppeteer": "25.9.0"
   }
 }
-

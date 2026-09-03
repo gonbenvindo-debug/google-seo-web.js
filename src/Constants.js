@@ -33,6 +33,27 @@ exports.Services = Object.freeze({
     },
 });
 
+exports.SearchConsoleReports = Object.freeze({
+    overview: '',
+    insights: 'performance/insights',
+    performance: 'performance/search-analytics',
+    'ai-performance': 'performance/search-analytics/ai',
+    indexing: 'index',
+    sitemaps: 'sitemaps',
+    removals: 'removals',
+    'core-web-vitals': 'core-web-vitals',
+    https: 'https',
+    'product-snippets': 'r/product',
+    'merchant-listings': 'r/merchant-listings',
+    'merchant-opportunities': 'merchant-opportunities',
+    breadcrumbs: 'r/breadcrumbs',
+    'manual-actions': 'manual-actions',
+    'security-issues': 'security-issues',
+    links: 'links',
+    achievements: 'achievements',
+    settings: 'settings',
+});
+
 exports.AllowedHosts = new Set([
     'search.google.com',
     'pagespeed.web.dev',

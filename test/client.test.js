@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { Client, Services } = require('..');
+const { Client, SearchConsoleReports, Services } = require('..');
 const { createApiServer } = require('../server');
 
 test('resolves service aliases and rejects URLs outside the SEO allowlist', () => {
@@ -17,6 +17,7 @@ test('resolves service aliases and rejects URLs outside the SEO allowlist', () =
     );
     assert.throws(() => client.resolveTarget('https://search.google.com.evil.test/'), /not allowed/);
     assert.throws(() => client.resolveTarget('file:///etc/passwd'), /not allowed/);
+    assert.equal(SearchConsoleReports.performance, 'performance/search-analytics');
 });
 
 test('closes the compact login browser and relaunches headless', async () => {
@@ -73,6 +74,27 @@ test('serves the LLM browser-control endpoints', async (t) => {
         back: async () => calls.push(['back']) && status(),
         reload: async () => calls.push(['reload']) && status(),
         screenshot: async () => Buffer.from('png'),
+        getSearchConsoleReports: () => [{ name: 'overview', url: Services['search-console'].url }],
+        getSearchConsoleReport: async () => ({
+            ...status(),
+            property: 'sc-domain:example.com',
+            tables: [{ headers: ['Page', 'Clicks'], rows: [['/', '1']] }],
+        }),
+        getPerformance: async () => ({
+            ...status(),
+            property: 'sc-domain:example.com',
+            tables: [{ headers: ['Query', 'Clicks'], rows: [['example', '1']] }],
+        }),
+        getPerformanceTimeGaps: async () => ({ observedDays: 1, gaps: [], complete: true }),
+        getSearchConsoleSummary: async () => ({ property: 'sc-domain:example.com' }),
+        getNotifications: async () => ({ unread: 0, total: 1, items: [{}] }),
+        getPageSpeedReport: async () => ({
+            strategy: 'mobile',
+            audits: [{ id: 'seo', title: 'SEO', score: 1 }],
+        }),
+        inspectUrl: async () => ({ title: 'URL Inspection', tables: [] }),
+        submitSitemap: async () => ({ title: 'Sitemaps', tables: [] }),
+        controlSearchConsole: async () => ({ title: 'Controlled', tables: [] }),
         destroy: async () => {
             calls.push(['destroy']);
             running = false;
@@ -105,6 +127,33 @@ test('serves the LLM browser-control endpoints', async (t) => {
     assert.equal((await request('/services')).status, 200);
     assert.equal((await request('/browser/state')).status, 200);
     assert.equal((await request('/auth/login', { method: 'POST', body: {} })).status, 200);
+    assert.equal((await request('/search-console/reports')).status, 200);
+    assert.equal((await request('/search-console/report?report=overview')).status, 200);
+    assert.equal((await request('/search-console/report.csv?report=overview')).headers.get('content-type'), 'text/csv; charset=utf-8');
+    assert.equal((await request('/search-console/performance?dimension=queries')).status, 200);
+    assert.equal((await request('/search-console/performance.csv?dimension=queries')).headers.get('content-type'), 'text/csv; charset=utf-8');
+    assert.equal((await request('/search-console/graph')).status, 200);
+    assert.equal((await request('/search-console/time-gaps')).status, 200);
+    assert.equal((await request('/search-console/summary')).status, 200);
+    assert.equal((await request('/search-console/notifications')).status, 200);
+    assert.equal((await request('/search-console/url-inspection?url=https%3A%2F%2Fexample.com')).status, 200);
+    assert.equal((await request('/search-console/sitemaps')).status, 200);
+    assert.equal((await request('/search-console/indexing')).status, 200);
+    assert.equal((await request('/search-console/validations')).status, 200);
+    assert.equal((await request('/search-console/control', {
+        method: 'POST', body: { label: 'PAGES' },
+    })).status, 200);
+    assert.equal((await request('/search-console/filter', {
+        method: 'POST', body: { label: 'Add filter' },
+    })).status, 200);
+    assert.equal((await request('/search-console/url-inspection', {
+        method: 'POST', body: { url: 'https://example.com', action: 'live' },
+    })).status, 200);
+    assert.equal((await request('/search-console/sitemaps', {
+        method: 'POST', body: { sitemap: 'https://example.com/sitemap.xml' },
+    })).status, 200);
+    assert.equal((await request('/pagespeed/report?url=https%3A%2F%2Fexample.com')).status, 200);
+    assert.equal((await request('/pagespeed/report.csv?url=https%3A%2F%2Fexample.com')).headers.get('content-type'), 'text/csv; charset=utf-8');
     assert.equal((await request('/browser/open', {
         method: 'POST',
         body: { target: 'pagespeed' },
