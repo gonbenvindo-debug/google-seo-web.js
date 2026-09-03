@@ -2,7 +2,9 @@
 
 const { spawn } = require('child_process');
 const EventEmitter = require('events');
+const fs = require('fs');
 const net = require('net');
+const path = require('path');
 const puppeteer = require('puppeteer');
 const LocalAuth = require('./authStrategies/LocalAuth');
 const { AllowedHosts, Events, Services } = require('./Constants');
@@ -316,9 +318,33 @@ class Client extends EventEmitter {
                 server.close(() => resolve(port));
             });
         });
+        const executablePath = options.executablePath || [
+            process.env.ProgramFiles,
+            process.env['ProgramFiles(x86)'],
+            process.env.LOCALAPPDATA,
+        ]
+            .filter(Boolean)
+            .map((base) => path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+            .find((candidate) => fs.existsSync(candidate));
+        if (!executablePath) {
+            throw new Error('Google Chrome is required for manual Google login on Windows');
+        }
+        if (!options.userDataDir) {
+            throw new Error('Visible Google login requires a separate userDataDir');
+        }
         this._browserProcess = spawn(
-            await Promise.resolve(options.executablePath || puppeteer.executablePath()),
-            (await puppeteer.defaultArgs(options)).concat(`--remote-debugging-port=${port}`),
+            await Promise.resolve(executablePath),
+            [
+                ...(options.args || []).filter((argument) =>
+                    !argument.startsWith('--remote-debugging-') &&
+                    !argument.startsWith('--user-data-dir='),
+                ),
+                `--user-data-dir=${options.userDataDir}`,
+                `--remote-debugging-port=${port}`,
+                '--no-first-run',
+                '--no-default-browser-check',
+                'about:blank',
+            ],
             { detached: true, stdio: 'ignore', windowsHide: false },
         );
         this._browserProcess.unref();

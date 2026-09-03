@@ -14,7 +14,7 @@ Esta é a primeira fase do projeto: controlo e descoberta da interface real. Os 
 
 ## Instalação
 
-Requer Node.js 22.12 ou superior.
+Requer Node.js 22.12 ou superior. No Windows, o login manual usa uma instalação normal do Google Chrome; o Chrome for Testing incluído pelo Puppeteer não é usado para autenticação Google.
 
 ```powershell
 npm install
@@ -168,4 +168,3 @@ npm test
 ```
 
 Os testes atuais cobrem a lista segura de serviços e o contrato HTTP. Não tentam iniciar sessão numa conta Google nem executar ações no Search Console.
-
