@@ -1,6 +1,8 @@
 'use strict';
 
+const { spawn } = require('child_process');
 const EventEmitter = require('events');
+const net = require('net');
 const puppeteer = require('puppeteer');
 const LocalAuth = require('./authStrategies/LocalAuth');
 const { AllowedHosts, Events, Services } = require('./Constants');
@@ -29,6 +31,7 @@ class Client extends EventEmitter {
         this.authStrategy.setup(this);
         this.pupBrowser = null;
         this.pupPage = null;
+        this._browserProcess = null;
         this._destroying = false;
         this._pageQueue = Promise.resolve();
     }
@@ -38,13 +41,13 @@ class Client extends EventEmitter {
         this._destroying = false;
         try {
             await this.authStrategy.beforeBrowserInitialized();
-            this.pupBrowser = await puppeteer.launch(this.options.puppeteer);
-            const pages = await this.pupBrowser.pages();
+            const pages = await this._launchBrowser();
             this.pupPage = pages[0] || await this.pupBrowser.newPage();
             this.pupPage.setDefaultTimeout(30000);
             this.pupBrowser.on('disconnected', () => {
                 this.pupBrowser = null;
                 this.pupPage = null;
+                this._browserProcess = null;
                 if (!this._destroying) this.emit(Events.DISCONNECTED);
             });
             await this.open(target);
@@ -277,9 +280,14 @@ class Client extends EventEmitter {
 
     async destroy() {
         this._destroying = true;
-        await this.pupBrowser?.close();
+        try {
+            await this.pupBrowser?.close();
+        } finally {
+            this._browserProcess?.kill();
+        }
         this.pupBrowser = null;
         this.pupPage = null;
+        this._browserProcess = null;
     }
 
     async resetSession() {
@@ -291,6 +299,47 @@ class Client extends EventEmitter {
         const result = this._pageQueue.then(task, task);
         this._pageQueue = result.catch(() => {});
         return result;
+    }
+
+    async _launchBrowser() {
+        const options = this.options.puppeteer;
+        if (process.platform !== 'win32' || options.headless !== false) {
+            this.pupBrowser = await puppeteer.launch(options);
+            return this.pupBrowser.pages();
+        }
+
+        const port = await new Promise((resolve, reject) => {
+            const server = net.createServer();
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', () => {
+                const { port } = server.address();
+                server.close(() => resolve(port));
+            });
+        });
+        this._browserProcess = spawn(
+            await Promise.resolve(options.executablePath || puppeteer.executablePath()),
+            (await puppeteer.defaultArgs(options)).concat(`--remote-debugging-port=${port}`),
+            { detached: true, stdio: 'ignore', windowsHide: false },
+        );
+        this._browserProcess.unref();
+
+        for (let attempt = 0; attempt < 100 && !this.pupBrowser; attempt++) {
+            await sleep(100);
+            const browser = await puppeteer.connect({
+                browserURL: `http://127.0.0.1:${port}`,
+                defaultViewport: options.defaultViewport,
+            }).catch(() => null);
+            if (!browser) continue;
+            const pages = await browser.pages().catch(() => []);
+            if (pages.length) {
+                this.pupBrowser = browser;
+                return pages;
+            }
+            await browser.disconnect().catch(() => {});
+        }
+        this._browserProcess.kill();
+        this._browserProcess = null;
+        throw new Error('Visible Chromium failed to start');
     }
 
     _requirePage() {
