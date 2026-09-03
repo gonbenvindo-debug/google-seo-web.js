@@ -1,7 +1,7 @@
 'use strict';
 
 const { spawn } = require('child_process');
-const EventEmitter = require('events');
+const { EventEmitter, once } = require('events');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
@@ -46,9 +46,14 @@ class Client extends EventEmitter {
         try {
             await this.authStrategy.beforeBrowserInitialized();
             await this._launchBrowser({ ...this.options.puppeteer, headless: true });
+            await this.pupPage.goto(Services['search-console'].url, {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000,
+            });
+            await sleep(1000);
 
             let visibleLogin = false;
-            if (!(await this._isAuthenticated())) {
+            if (!(await this._isSearchConsoleAuthenticated())) {
                 if (this.options.puppeteer.headless === false) {
                     await this._restartBrowser(this.options.puppeteer);
                     visibleLogin = true;
@@ -80,7 +85,17 @@ class Client extends EventEmitter {
                 await this._restartBrowser(this.options.puppeteer);
             }
 
-            if (visibleLogin && this.options.headlessAfterLogin) await this._restartHeadless();
+            if (visibleLogin && this.options.headlessAfterLogin) {
+                await this._restartHeadless();
+                await this.pupPage.goto(Services['search-console'].url, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000,
+                });
+                await sleep(1000);
+                if (!(await this._isSearchConsoleAuthenticated())) {
+                    throw new Error('Google session was not persisted after login');
+                }
+            }
             this.emit(Events.AUTHENTICATED);
             await this.open(target);
             this.emit(Events.READY, await this.getStatus());
@@ -145,11 +160,9 @@ class Client extends EventEmitter {
             service: this._serviceForUrl(url),
             url,
             title: await this.pupPage.title(),
-            googleSession: hasGoogleSession
-                ? 'present'
-                : url.includes('accounts.google.com') || url.endsWith('/search-console/about')
-                    ? 'required'
-                    : 'unknown',
+            googleSession: url.includes('accounts.google.com') || url.includes('/search-console/about')
+                ? 'required'
+                : hasGoogleSession ? 'present' : 'unknown',
         };
     }
 
@@ -306,14 +319,12 @@ class Client extends EventEmitter {
 
     async destroy() {
         this._destroying = true;
-        try {
-            await this.pupBrowser?.close();
-        } finally {
-            this._browserProcess?.kill();
-        }
+        const browser = this.pupBrowser;
+        const browserProcess = this._browserProcess;
         this.pupBrowser = null;
         this.pupPage = null;
         this._browserProcess = null;
+        await this._closeBrowser(browser, browserProcess);
     }
 
     async resetSession() {
@@ -422,12 +433,22 @@ class Client extends EventEmitter {
         this.pupPage = null;
         this._browserProcess = null;
         try {
-            await browser?.close();
+            await this._closeBrowser(browser, browserProcess);
         } finally {
-            browserProcess?.kill();
             this._destroying = false;
         }
         await this._launchBrowser(options);
+    }
+
+    async _closeBrowser(browser, browserProcess) {
+        try {
+            await browser?.close();
+            if (browserProcess?.exitCode === null) {
+                await Promise.race([once(browserProcess, 'exit'), sleep(5000)]);
+            }
+        } finally {
+            if (browserProcess?.exitCode === null) browserProcess.kill();
+        }
     }
 
     async _isAuthenticated() {
@@ -444,13 +465,56 @@ class Client extends EventEmitter {
     async _waitForAuthentication() {
         const started = Date.now();
         while (this.pupBrowser?.connected) {
-            if (await this._isAuthenticated() && !this.pupPage.url().includes('accounts.google.com')) return;
+            if (await this._isAuthenticated() && !this.pupPage.url().includes('accounts.google.com')) {
+                await this.pupPage.goto(Services['search-console'].url, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000,
+                });
+                await sleep(1500);
+                if (await this._isSearchConsoleAuthenticated()) return;
+                await this.pupPage.goto(LoginURL, { waitUntil: 'domcontentloaded', timeout: 0 });
+            }
             if (this.options.authTimeoutMs && Date.now() - started >= this.options.authTimeoutMs) {
                 throw new Error('Google login timed out');
             }
             await sleep(1000);
         }
         throw new Error('Login window was closed before authentication');
+    }
+
+    async _isSearchConsoleAuthenticated() {
+        if (!this.pupPage || !(await this._isAuthenticated())) return false;
+        let url;
+        try {
+            url = new URL(this.pupPage.url());
+        } catch {
+            return false;
+        }
+        if (
+            url.hostname !== 'search.google.com' ||
+            !url.pathname.startsWith('/search-console') ||
+            url.pathname.startsWith('/search-console/about')
+        ) {
+            return false;
+        }
+        return this.pupPage.evaluate(() => {
+            if (document.querySelector([
+                '[aria-label*="Google Account"]',
+                '[aria-label*="Conta Google"]',
+                'a[href*="SignOutOptions"]',
+            ].join(','))) return true;
+            const text = (document.body?.innerText || '').toLowerCase();
+            return [
+                'overview',
+                'vista geral',
+                'performance',
+                'desempenho',
+                'url inspection',
+                'inspeção do url',
+                'indexing',
+                'indexação',
+            ].some((marker) => text.includes(marker));
+        });
     }
 
     _requirePage() {

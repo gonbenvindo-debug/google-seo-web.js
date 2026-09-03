@@ -22,19 +22,30 @@ test('resolves service aliases and rejects URLs outside the SEO allowlist', () =
 test('closes the compact login browser and relaunches headless', async () => {
     const client = new Client();
     let closed = false;
-    let killed = false;
     let launchedWith;
     client.pupBrowser = { close: async () => { closed = true; } };
-    client._browserProcess = { kill: () => { killed = true; } };
+    client._browserProcess = { exitCode: 0, kill: () => assert.fail('cleanly closed browser must not be killed') };
     client._launchBrowser = async (options) => { launchedWith = options; };
 
     await client._restartHeadless();
 
     assert.equal(closed, true);
-    assert.equal(killed, true);
     assert.equal(launchedWith.headless, true);
     assert.deepEqual(launchedWith.args, ['--window-size=520,760']);
     assert.equal(client._destroying, false);
+});
+
+test('accepts only an authenticated Search Console application page', async () => {
+    const client = new Client();
+    client._isAuthenticated = async () => true;
+    client.pupPage = {
+        url: () => 'https://search.google.com/search-console/about',
+        evaluate: async () => true,
+    };
+    assert.equal(await client._isSearchConsoleAuthenticated(), false);
+
+    client.pupPage.url = () => 'https://search.google.com/search-console?resource_id=sc-domain:example.com';
+    assert.equal(await client._isSearchConsoleAuthenticated(), true);
 });
 
 test('serves the LLM browser-control endpoints', async (t) => {
