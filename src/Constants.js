@@ -1,5 +1,7 @@
 'use strict';
 
+exports.LoginURL = 'https://accounts.google.com/ServiceLogin?service=sitemaps&continue=https://search.google.com/search-console/';
+
 exports.Services = Object.freeze({
     'search-console': {
         name: 'Google Search Console',
@@ -42,8 +44,10 @@ exports.AllowedHosts = new Set([
 ]);
 
 exports.Events = Object.freeze({
+    LOGIN_REQUIRED: 'login',
+    AUTHENTICATED: 'authenticated',
+    AUTHENTICATION_FAILURE: 'auth_failure',
     READY: 'ready',
     PAGE_CHANGED: 'page_changed',
     DISCONNECTED: 'disconnected',
 });
-

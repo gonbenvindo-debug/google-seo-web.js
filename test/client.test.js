@@ -19,6 +19,24 @@ test('resolves service aliases and rejects URLs outside the SEO allowlist', () =
     assert.throws(() => client.resolveTarget('file:///etc/passwd'), /not allowed/);
 });
 
+test('closes the compact login browser and relaunches headless', async () => {
+    const client = new Client();
+    let closed = false;
+    let killed = false;
+    let launchedWith;
+    client.pupBrowser = { close: async () => { closed = true; } };
+    client._browserProcess = { kill: () => { killed = true; } };
+    client._launchBrowser = async (options) => { launchedWith = options; };
+
+    await client._restartHeadless();
+
+    assert.equal(closed, true);
+    assert.equal(killed, true);
+    assert.equal(launchedWith.headless, true);
+    assert.deepEqual(launchedWith.args, ['--window-size=520,760']);
+    assert.equal(client._destroying, false);
+});
+
 test('serves the LLM browser-control endpoints', async (t) => {
     let running = false;
     const calls = [];
@@ -90,4 +108,3 @@ test('serves the LLM browser-control endpoints', async (t) => {
         ['destroy'],
     ]);
 });
-

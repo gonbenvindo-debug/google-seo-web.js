@@ -7,14 +7,16 @@ const net = require('net');
 const path = require('path');
 const puppeteer = require('puppeteer');
 const LocalAuth = require('./authStrategies/LocalAuth');
-const { AllowedHosts, Events, Services } = require('./Constants');
+const { AllowedHosts, Events, LoginURL, Services } = require('./Constants');
 
 const DEFAULT_OPTIONS = {
+    authTimeoutMs: 0,
     defaultService: 'search-console',
+    headlessAfterLogin: true,
     puppeteer: {
         headless: false,
         defaultViewport: null,
-        args: ['--window-size=1280,900'],
+        args: ['--window-size=520,760'],
     },
 };
 
@@ -43,15 +45,43 @@ class Client extends EventEmitter {
         this._destroying = false;
         try {
             await this.authStrategy.beforeBrowserInitialized();
-            const pages = await this._launchBrowser();
-            this.pupPage = pages[0] || await this.pupBrowser.newPage();
-            this.pupPage.setDefaultTimeout(30000);
-            this.pupBrowser.on('disconnected', () => {
-                this.pupBrowser = null;
-                this.pupPage = null;
-                this._browserProcess = null;
-                if (!this._destroying) this.emit(Events.DISCONNECTED);
-            });
+            await this._launchBrowser({ ...this.options.puppeteer, headless: true });
+
+            let visibleLogin = false;
+            if (!(await this._isAuthenticated())) {
+                if (this.options.puppeteer.headless === false) {
+                    await this._restartBrowser(this.options.puppeteer);
+                    visibleLogin = true;
+                }
+                this.emit(Events.LOGIN_REQUIRED, { url: LoginURL });
+                await this.pupPage.goto(LoginURL, { waitUntil: 'domcontentloaded', timeout: 0 });
+                try {
+                    await this._waitForAuthentication();
+                } catch (error) {
+                    this.emit(Events.AUTHENTICATION_FAILURE, error.message);
+                    throw error;
+                }
+
+                if (visibleLogin) {
+                    await this.pupPage.setContent(`<!doctype html>
+                        <html lang="pt"><meta charset="utf-8"><title>Google autenticado</title>
+                        <style>
+                            body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+                                font: 16px system-ui; color: #171717; background: #fff; text-align: center; }
+                            b { display: grid; place-items: center; width: 52px; height: 52px; margin: auto;
+                                border-radius: 50%; color: #fff; background: #16a34a; font-size: 28px; }
+                            h1 { margin: 18px 0 8px; font-size: 22px; }
+                            p { margin: 0; color: #666; }
+                        </style><main><b>✓</b><h1>Autenticação concluída</h1>
+                        <p>A janela vai fechar automaticamente.</p></main></html>`);
+                    await sleep(1500);
+                }
+            } else if (!this.options.headlessAfterLogin && this.options.puppeteer.headless === false) {
+                await this._restartBrowser(this.options.puppeteer);
+            }
+
+            if (visibleLogin && this.options.headlessAfterLogin) await this._restartHeadless();
+            this.emit(Events.AUTHENTICATED);
             await this.open(target);
             this.emit(Events.READY, await this.getStatus());
             return this;
@@ -109,13 +139,7 @@ class Client extends EventEmitter {
             };
         }
         const url = this.pupPage.url();
-        const cookies = await this.pupBrowser.defaultBrowserContext().cookies().catch(() => []);
-        const hasGoogleSession = cookies.some(({ name }) => [
-            'SID',
-            'SAPISID',
-            '__Secure-1PSID',
-            '__Secure-3PSID',
-        ].includes(name));
+        const hasGoogleSession = await this._isAuthenticated();
         return {
             running: true,
             service: this._serviceForUrl(url),
@@ -303,11 +327,26 @@ class Client extends EventEmitter {
         return result;
     }
 
-    async _launchBrowser() {
-        const options = this.options.puppeteer;
+    async _launchBrowser(options) {
+        const systemChrome = process.platform === 'win32' && (options.executablePath || [
+            process.env.ProgramFiles,
+            process.env['ProgramFiles(x86)'],
+            process.env.LOCALAPPDATA,
+        ]
+            .filter(Boolean)
+            .map((base) => path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+            .find((candidate) => fs.existsSync(candidate)));
+        if (process.platform === 'win32' && !systemChrome) {
+            throw new Error('Google Chrome is required for Google authentication on Windows');
+        }
         if (process.platform !== 'win32' || options.headless !== false) {
-            this.pupBrowser = await puppeteer.launch(options);
-            return this.pupBrowser.pages();
+            this.pupBrowser = await puppeteer.launch({
+                ...options,
+                ...(systemChrome ? { executablePath: systemChrome } : {}),
+            });
+            const pages = await this.pupBrowser.pages();
+            await this._configureBrowser(pages);
+            return;
         }
 
         const port = await new Promise((resolve, reject) => {
@@ -318,22 +357,11 @@ class Client extends EventEmitter {
                 server.close(() => resolve(port));
             });
         });
-        const executablePath = options.executablePath || [
-            process.env.ProgramFiles,
-            process.env['ProgramFiles(x86)'],
-            process.env.LOCALAPPDATA,
-        ]
-            .filter(Boolean)
-            .map((base) => path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-            .find((candidate) => fs.existsSync(candidate));
-        if (!executablePath) {
-            throw new Error('Google Chrome is required for manual Google login on Windows');
-        }
         if (!options.userDataDir) {
             throw new Error('Visible Google login requires a separate userDataDir');
         }
         this._browserProcess = spawn(
-            await Promise.resolve(executablePath),
+            await Promise.resolve(systemChrome),
             [
                 ...(options.args || []).filter((argument) =>
                     !argument.startsWith('--remote-debugging-') &&
@@ -359,13 +387,70 @@ class Client extends EventEmitter {
             const pages = await browser.pages().catch(() => []);
             if (pages.length) {
                 this.pupBrowser = browser;
-                return pages;
+                await this._configureBrowser(pages);
+                return;
             }
             await browser.disconnect().catch(() => {});
         }
         this._browserProcess.kill();
         this._browserProcess = null;
         throw new Error('Visible Chromium failed to start');
+    }
+
+    async _configureBrowser(pages) {
+        const browser = this.pupBrowser;
+        this.pupPage = pages[0] || await browser.newPage();
+        this.pupPage.setDefaultTimeout(30000);
+        browser.on('disconnected', () => {
+            if (this.pupBrowser !== browser) return;
+            this.pupBrowser = null;
+            this.pupPage = null;
+            this._browserProcess = null;
+            if (!this._destroying) this.emit(Events.DISCONNECTED);
+        });
+    }
+
+    async _restartHeadless() {
+        await this._restartBrowser({ ...this.options.puppeteer, headless: true });
+    }
+
+    async _restartBrowser(options) {
+        this._destroying = true;
+        const browser = this.pupBrowser;
+        const browserProcess = this._browserProcess;
+        this.pupBrowser = null;
+        this.pupPage = null;
+        this._browserProcess = null;
+        try {
+            await browser?.close();
+        } finally {
+            browserProcess?.kill();
+            this._destroying = false;
+        }
+        await this._launchBrowser(options);
+    }
+
+    async _isAuthenticated() {
+        if (!this.pupBrowser) return false;
+        const cookies = await this.pupBrowser.defaultBrowserContext().cookies().catch(() => []);
+        return cookies.some(({ name }) => [
+            'SID',
+            'SAPISID',
+            '__Secure-1PSID',
+            '__Secure-3PSID',
+        ].includes(name));
+    }
+
+    async _waitForAuthentication() {
+        const started = Date.now();
+        while (this.pupBrowser?.connected) {
+            if (await this._isAuthenticated() && !this.pupPage.url().includes('accounts.google.com')) return;
+            if (this.options.authTimeoutMs && Date.now() - started >= this.options.authTimeoutMs) {
+                throw new Error('Google login timed out');
+            }
+            await sleep(1000);
+        }
+        throw new Error('Login window was closed before authentication');
     }
 
     _requirePage() {
@@ -391,7 +476,10 @@ class Client extends EventEmitter {
 
     _serviceForUrl(url) {
         return Object.entries(Services)
-            .find(([, service]) => url.startsWith(service.url))?.[0] || null;
+            .find(([, service]) => {
+                const prefix = service.url.replace(/\/$/, '');
+                return url === prefix || url.startsWith(`${prefix}/`) || url.startsWith(`${prefix}?`);
+            })?.[0] || null;
     }
 }
 

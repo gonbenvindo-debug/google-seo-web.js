@@ -46,7 +46,7 @@ Invoke-RestMethod http://127.0.0.1:3100/auth/login `
   -Method Post -ContentType 'application/json' -Body '{}'
 ```
 
-Uma janela Chromium abre no Search Console. Faça o login e conclua 2FA ou desafios diretamente nessa janela. A sessão será reutilizada nos arranques seguintes.
+Quando ainda não existe uma sessão, abre uma janela compacta do Google Chrome. Faça o login e conclua 2FA ou desafios diretamente nessa janela. Após a confirmação, a janela fecha automaticamente e o controlador continua em modo invisível. Nos arranques seguintes, a sessão é reutilizada sem mostrar a janela.
 
 ### 2. Ler a página para um LLM
 
