@@ -1,0 +1,5 @@
+node_modules/
+.google-seo-auth/
+screenshots/
+*.log
+
