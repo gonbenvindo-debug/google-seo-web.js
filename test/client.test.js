@@ -67,6 +67,11 @@ test('serves the LLM browser-control endpoints', async (t) => {
             running = false;
             client.pupBrowser = null;
         },
+        resetSession: async () => {
+            calls.push(['resetSession']);
+            running = false;
+            client.pupBrowser = null;
+        },
     };
     const server = createApiServer(client, { apiKey: 'secret' });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -99,12 +104,16 @@ test('serves the LLM browser-control endpoints', async (t) => {
         body: { id: 'e8', text: 'iberflag.com', submit: true },
     })).status, 200);
     assert.equal((await request('/browser/screenshot')).headers.get('content-type'), 'image/png');
+    assert.equal((await request('/auth/logout', { method: 'POST', body: {} })).status, 200);
+    assert.equal((await request('/auth/login', { method: 'POST', body: {} })).status, 200);
     assert.equal((await request('/browser/stop', { method: 'POST', body: {} })).status, 200);
     assert.deepEqual(calls, [
         ['initialize', 'search-console'],
         ['open', 'pagespeed'],
         ['click', 'e7'],
         ['type', 'e8', 'iberflag.com', { submit: true }],
+        ['resetSession'],
+        ['initialize', 'search-console'],
         ['destroy'],
     ]);
 });

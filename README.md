@@ -101,6 +101,7 @@ Use `"submit": true` apenas quando pretende pressionar Enter depois da escrita.
 | `GET` | `/health` | — | Estado do browser e da sessão Google |
 | `GET` | `/auth/status` | — | Alias legível do estado atual |
 | `POST` | `/auth/login` | `{ "service"?: string }` | Abre o Chromium persistente |
+| `POST` | `/auth/logout` | `{}` | Fecha o browser e elimina a sessão local guardada |
 | `GET` | `/services` | — | Serviços e URLs conhecidos |
 | `POST` | `/browser/start` | `{ "service"?: string }` | Inicia o browser |
 | `POST` | `/browser/open` | `{ "target": string }` | Abre um serviço ou URL permitida |

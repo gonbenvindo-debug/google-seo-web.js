@@ -6,6 +6,7 @@ const { Client, LocalAuth, Services } = require('./');
 
 const jsonRoutes = new Set([
     'POST /auth/login',
+    'POST /auth/logout',
     'POST /browser/start',
     'POST /browser/open',
     'POST /browser/click',
@@ -87,6 +88,10 @@ function createApiServer(client, { apiKey } = {}) {
             if (route === 'POST /auth/login' || route === 'POST /browser/start') {
                 return sendJson(200, await start(body.target || body.service || 'search-console'));
             }
+            if (route === 'POST /auth/logout') {
+                await client.resetSession();
+                return sendJson(200, await client.getStatus());
+            }
             if (route === 'POST /browser/open') {
                 if (!body.target) throw new TypeError('target is required');
                 return sendJson(200, await start(body.target));
@@ -150,4 +155,3 @@ if (require.main === module) main().catch((error) => {
 });
 
 module.exports = { createApiServer };
-
