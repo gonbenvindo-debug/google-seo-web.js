@@ -88,6 +88,7 @@ test('serves the LLM browser-control endpoints', async (t) => {
         }),
         getPerformanceTimeGaps: async () => ({ observedDays: 1, gaps: [], complete: true }),
         getSearchConsoleSummary: async () => ({ property: 'sc-domain:example.com' }),
+        getLinks: async () => ({ complete: true, sections: [] }),
         getIndexingPages: async (options) => {
             indexingPagesOptions = options;
             return {
@@ -144,6 +145,7 @@ test('serves the LLM browser-control endpoints', async (t) => {
     assert.equal((await request('/search-console/time-gaps')).status, 200);
     assert.equal((await request('/search-console/summary')).status, 200);
     assert.equal((await request('/search-console/notifications')).status, 200);
+    assert.equal((await request('/search-console/links')).status, 200);
     assert.equal((await request('/search-console/url-inspection?url=https%3A%2F%2Fexample.com')).status, 200);
     assert.equal((await request('/search-console/sitemaps')).status, 200);
     assert.equal((await request('/search-console/indexing')).status, 200);

@@ -254,6 +254,14 @@ function createApiServer(client, { apiKey } = {}) {
                 await ensureSearchConsole();
                 return sendJson(200, await client.getNotifications());
             }
+            if (route === 'GET /search-console/links') {
+                await ensureSearchConsole();
+                const report = await client.getLinks({
+                    property: url.searchParams.get('property') || undefined,
+                    maxPages: integerParam(url.searchParams, 'maxPages', 500),
+                });
+                return sendJson(report.complete ? 200 : 206, report);
+            }
             if (route === 'GET /search-console/url-inspection') {
                 await ensureSearchConsole();
                 const inspectedUrl = url.searchParams.get('url');

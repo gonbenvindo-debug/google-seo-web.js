@@ -31,7 +31,7 @@ Os relatórios semânticos devolvem:
 - `charts[]` com descrição acessível e rótulos SVG;
 - `pagination`, `pagesRead` e `rawText` para interpretação por LLM.
 
-`allPages=true` segue automaticamente `Next page`, elimina linhas repetidas e agrega a tabela. `maxPages` limita a recolha entre 1 e 500.
+`allPages=true` percorre automaticamente todos os paginadores visíveis, elimina linhas repetidas e agrega cada tabela. `maxPages` limita a recolha entre 1 e 500.
 
 ## Navegação e relatórios
 
@@ -118,6 +118,10 @@ Para campos de texto: `{ "label": "...", "text": "valor", "submit": false }`. `e
 ### `GET /search-console/notifications`
 
 Abre o sino, recolhe as mensagens e fecha o painel. Devolve `unread`, `total` e `items[]` com `title`, `date` e `category`.
+
+### `GET /search-console/links`
+
+Recolhe o resumo de links e expande automaticamente todos os painéis `MORE`, incluindo a paginação integral de cada drilldown. Aceita `property` e `maxPages`; responde com `complete=false` e HTTP 206 se algum painel ficar incompleto.
 
 ## Indexação e validações
 

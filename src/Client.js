@@ -537,6 +537,42 @@ class Client extends EventEmitter {
         });
     }
 
+    getLinks({ property, maxPages = 500 } = {}) {
+        return this._runPageTask(async () => {
+            await this._openSearchConsole(SearchConsoleReports.links, property);
+            const summary = await this._extractReport();
+            const drilldowns = summary.links.filter(({ url }) => {
+                try {
+                    return new URL(url).pathname === '/search-console/links/drilldown';
+                } catch {
+                    return false;
+                }
+            });
+            const sections = [];
+            for (const { url } of drilldowns) {
+                const target = new URL(url);
+                await this._openSearchConsole(`${target.pathname.replace('/search-console/', '')}${target.search}`, property);
+                const report = await this._collectCurrentReport({ allPages: true, maxPages });
+                sections.push({
+                    type: target.searchParams.get('type'),
+                    target: target.searchParams.get('target'),
+                    domain: target.searchParams.get('domain'),
+                    tables: report.tables,
+                    paginations: report.paginations,
+                    pagesRead: report.pagesRead,
+                    complete: report.paginations.every(({ to, total }) => to === total),
+                });
+            }
+            return {
+                generatedAt: new Date().toISOString(),
+                property: summary.property,
+                summary,
+                sections,
+                complete: sections.every(({ complete }) => complete),
+            };
+        });
+    }
+
     getPerformance({
         property,
         dimension = 'queries',
@@ -1123,7 +1159,12 @@ class Client extends EventEmitter {
             chartDescriptions.forEach((description) => {
                 if (!charts.some((chart) => chart.description === description)) charts.push({ type: 'accessible-text', description, labels: [] });
             });
-            const pagination = bodyText.match(/(\d[\d,]*)-(\d[\d,]*) of (\d[\d,]*)/i);
+            const paginations = [...bodyText.matchAll(/(\d[\d,]*)\s*[-–]\s*(\d[\d,]*)\s+(?:of|de)\s+(\d[\d,]*)/gi)]
+                .map((match) => ({
+                    from: Number(match[1].replace(/,/g, '')),
+                    to: Number(match[2].replace(/,/g, '')),
+                    total: Number(match[3].replace(/,/g, '')),
+                }));
             return {
                 updated: bodyText.match(/Last update(?:d)?:\s*([^\n]+)/i)?.[1] || null,
                 headings: [...document.querySelectorAll('h1, h2, h3, [role="heading"]')]
@@ -1132,11 +1173,8 @@ class Client extends EventEmitter {
                 controls,
                 tables,
                 charts,
-                pagination: pagination ? {
-                    from: Number(pagination[1].replace(/,/g, '')),
-                    to: Number(pagination[2].replace(/,/g, '')),
-                    total: Number(pagination[3].replace(/,/g, '')),
-                } : null,
+                pagination: paginations[0] || null,
+                paginations,
                 links: [...document.querySelectorAll('a[href]')].filter(visible).map((link) => ({
                     label: labelFor(link),
                     url: link.href,
@@ -1159,9 +1197,9 @@ class Client extends EventEmitter {
         const report = await this._extractReport();
         let pagesRead = 1;
         const nextPage = async () => {
-            if (report.pagination && report.pagination.to >= report.pagination.total) return false;
             for (let attempt = 0; attempt < 5; attempt++) {
-                if (await this._clickNextPage()) return true;
+                const clicked = await this._clickNextPage();
+                if (clicked !== null) return clicked;
                 await sleep(400);
             }
             return false;
@@ -1177,6 +1215,7 @@ class Client extends EventEmitter {
                 });
             });
             report.pagination = page.pagination;
+            report.paginations = page.paginations;
             pagesRead++;
         }
         report.pagesRead = pagesRead;
@@ -1193,20 +1232,24 @@ class Client extends EventEmitter {
                 const rect = element.getBoundingClientRect();
                 return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
             };
-            const counter = [...document.querySelectorAll('*')].find((element) =>
+            const counters = [...document.querySelectorAll('*')].filter((element) =>
                 element.children.length === 0 && visible(element) &&
                 /^\d[\d,]*\s*[-–]\s*\d[\d,]*\s+(?:of|de)\s+\d[\d,]*$/i.test(element.textContent.trim()));
-            if (!counter) return false;
+            const counter = counters.find((element) => {
+                const [, to, total] = element.textContent.match(/\d[\d,]*\s*[-–]\s*(\d[\d,]*)\s+(?:of|de)\s+(\d[\d,]*)/i) || [];
+                return Number(to?.replace(/,/g, '')) < Number(total?.replace(/,/g, ''));
+            });
+            if (!counter) return counters.length ? false : null;
             for (let container = counter.parentElement, depth = 0; container && depth < 5; container = container.parentElement, depth++) {
                 const right = [...container.querySelectorAll('button, [role="button"], [jsaction], [tabindex]')]
                     .filter((element) => visible(element) && element.getBoundingClientRect().left > counter.getBoundingClientRect().right)
                     .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
                 if (!right) continue;
-                if (right.disabled || right.getAttribute('aria-disabled') === 'true' || right.getAttribute('tabindex') === '-1') return false;
+                if (right.disabled || right.getAttribute('aria-disabled') === 'true' || right.getAttribute('tabindex') === '-1') return null;
                 right.click();
                 return true;
             }
-            return false;
+            return null;
         });
     }
 
