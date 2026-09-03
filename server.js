@@ -153,6 +153,15 @@ function createApiServer(client, { apiKey } = {}) {
                 allPages: booleanParam(url.searchParams, 'allPages'),
                 maxPages: integerParam(url.searchParams, 'maxPages', 50),
             });
+            const indexingPagesOptions = () => ({
+                property: url.searchParams.get('property') || undefined,
+                status: url.searchParams.get('status') || 'all',
+                reason: url.searchParams.get('reason') || undefined,
+                urlContains: url.searchParams.get('urlContains') || undefined,
+                language: url.searchParams.get('language') || undefined,
+                crawled: url.searchParams.has('crawled') ? booleanParam(url.searchParams, 'crawled') : undefined,
+                maxPages: integerParam(url.searchParams, 'maxPages', 500),
+            });
 
             if (route === 'GET /health' || route === 'GET /auth/status') {
                 return sendJson(200, await client.getStatus());
@@ -283,6 +292,22 @@ function createApiServer(client, { apiKey } = {}) {
                     allPages: booleanParam(url.searchParams, 'allPages'),
                     maxPages: integerParam(url.searchParams, 'maxPages', 50),
                 }));
+            }
+            if (route === 'GET /search-console/indexing/pages' || route === 'GET /search-console/indexing/pages.csv') {
+                await ensureSearchConsole();
+                const report = await client.getIndexingPages(indexingPagesOptions());
+                if (route.endsWith('.csv')) {
+                    if (!report.complete) {
+                        const error = new Error('Search Console extraction is incomplete; use the JSON endpoint for details');
+                        error.status = 502;
+                        throw error;
+                    }
+                    return sendCsv(toCsv({ tables: [{
+                        headers: ['URL', 'Status', 'Reason', 'Last crawled'],
+                        rows: report.pages.map((page) => [page.url, page.status, page.reason, page.lastCrawled]),
+                    }] }), 'indexing-pages.csv');
+                }
+                return sendJson(report.complete ? 200 : 206, report);
             }
             if (route === 'POST /search-console/control' || route === 'POST /search-console/filter') {
                 await ensureSearchConsole();

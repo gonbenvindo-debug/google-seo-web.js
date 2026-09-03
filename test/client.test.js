@@ -51,6 +51,7 @@ test('accepts only an authenticated Search Console application page', async () =
 
 test('serves the LLM browser-control endpoints', async (t) => {
     let running = false;
+    let indexingPagesOptions;
     const calls = [];
     const status = () => ({
         running,
@@ -87,6 +88,13 @@ test('serves the LLM browser-control endpoints', async (t) => {
         }),
         getPerformanceTimeGaps: async () => ({ observedDays: 1, gaps: [], complete: true }),
         getSearchConsoleSummary: async () => ({ property: 'sc-domain:example.com' }),
+        getIndexingPages: async (options) => {
+            indexingPagesOptions = options;
+            return {
+                complete: true,
+                pages: [{ url: 'https://example.com/es/guias/a', status: 'not-indexed', reason: 'Discovered', lastCrawled: null }],
+            };
+        },
         getNotifications: async () => ({ unread: 0, total: 1, items: [{}] }),
         getPageSpeedReport: async () => ({
             strategy: 'mobile',
@@ -140,6 +148,17 @@ test('serves the LLM browser-control endpoints', async (t) => {
     assert.equal((await request('/search-console/sitemaps')).status, 200);
     assert.equal((await request('/search-console/indexing')).status, 200);
     assert.equal((await request('/search-console/validations')).status, 200);
+    assert.equal((await request('/search-console/indexing/pages?status=not-indexed&reason=discovered&language=es&crawled=false&urlContains=%2Fguias%2F&maxPages=75')).status, 200);
+    assert.deepEqual(indexingPagesOptions, {
+        property: undefined,
+        status: 'not-indexed',
+        reason: 'discovered',
+        urlContains: '/guias/',
+        language: 'es',
+        crawled: false,
+        maxPages: 75,
+    });
+    assert.equal((await request('/search-console/indexing/pages.csv')).headers.get('content-type'), 'text/csv; charset=utf-8');
     assert.equal((await request('/search-console/control', {
         method: 'POST', body: { label: 'PAGES' },
     })).status, 200);

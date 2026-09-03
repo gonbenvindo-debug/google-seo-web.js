@@ -457,6 +457,86 @@ class Client extends EventEmitter {
         });
     }
 
+    getIndexingPages({
+        property,
+        status = 'all',
+        reason,
+        urlContains,
+        language,
+        crawled,
+        maxPages = 500,
+    } = {}) {
+        return this._runPageTask(async () => {
+            if (!['all', 'indexed', 'not-indexed'].includes(status)) {
+                throw new TypeError('status must be all, indexed or not-indexed');
+            }
+            if (status === 'indexed' && reason) throw new TypeError('reason only applies to not-indexed pages');
+            if (language && !['pt', 'es'].includes(language)) throw new TypeError('language must be pt or es');
+            if (crawled !== undefined && typeof crawled !== 'boolean') throw new TypeError('crawled must be a boolean');
+
+            await this._openSearchConsole(SearchConsoleReports.indexing, property);
+            const overview = await this._extractReport();
+            const metric = (label) => Number(overview.metrics.find((item) => item.label === label)?.value || 0);
+            const reasons = (overview.tables.find(({ headers }) => headers.some((header) => /reason/i.test(header)))?.rows || [])
+                .map((row) => ({
+                    reason: row[0],
+                    count: Number([...row].reverse().find((value) => /^\d[\d,]*$/.test(value))?.replace(/,/g, '') || 0),
+                }));
+            const wantedReasons = reasons.filter((item) => item.count &&
+                (!reason || item.reason.toLowerCase().includes(reason.toLowerCase())));
+            const pages = [];
+            const extraction = [];
+            const collect = async (pageStatus, pageReason, expected) => {
+                const report = await this._collectCurrentReport({ allPages: true, maxPages });
+                const rows = report.tables.find(({ headers }) => headers.some((header) => /^url$/i.test(header)))?.rows || [];
+                rows.forEach(([url, lastCrawled]) => pages.push({
+                    url,
+                    status: pageStatus,
+                    reason: pageReason,
+                    lastCrawled: !lastCrawled || /^(?:N\/A|1970-)/i.test(lastCrawled) ? null : lastCrawled,
+                }));
+                extraction.push({ status: pageStatus, reason: pageReason, expected, collected: rows.length });
+            };
+
+            if (status !== 'not-indexed' && !reason) {
+                await this._openSearchConsole('index/drilldown?pages=ALL_URLS', property);
+                await collect('indexed', null, metric('Indexed'));
+            }
+            if (status !== 'indexed') {
+                for (const item of wantedReasons) {
+                    await this._openSearchConsole(SearchConsoleReports.indexing, property);
+                    if (!(await this._clickByLabel(item.reason, { exact: false, selector: 'tr, [role="row"]' }))) {
+                        throw new Error(`Indexing reason is unavailable: ${item.reason}`);
+                    }
+                    await sleep(1000);
+                    await collect('not-indexed', item.reason, item.count);
+                }
+            }
+
+            const matchesLanguage = (url) => /^\/es(?:\/|$)/.test(new URL(url).pathname) === (language === 'es');
+            const filtered = pages.filter((page) =>
+                (!urlContains || page.url.toLowerCase().includes(urlContains.toLowerCase())) &&
+                (!language || matchesLanguage(page.url)) &&
+                (crawled === undefined || Boolean(page.lastCrawled) === crawled));
+            return {
+                generatedAt: new Date().toISOString(),
+                property: overview.property,
+                updated: overview.updated,
+                complete: extraction.every((item) => item.collected === item.expected),
+                filters: { status, reason: reason || null, urlContains: urlContains || null, language: language || null, crawled },
+                summary: {
+                    known: metric('Indexed') + metric('Not indexed'),
+                    indexed: metric('Indexed'),
+                    notIndexed: metric('Not indexed'),
+                    returned: filtered.length,
+                    byReason: reasons,
+                },
+                extraction,
+                pages: filtered,
+            };
+        });
+    }
+
     getPerformance({
         property,
         dimension = 'queries',
@@ -1078,7 +1158,15 @@ class Client extends EventEmitter {
         }
         const report = await this._extractReport();
         let pagesRead = 1;
-        while (allPages && pagesRead < maxPages && await this._clickByLabel('Next page')) {
+        const nextPage = async () => {
+            if (report.pagination && report.pagination.to >= report.pagination.total) return false;
+            for (let attempt = 0; attempt < 5; attempt++) {
+                if (await this._clickNextPage()) return true;
+                await sleep(400);
+            }
+            return false;
+        };
+        while (allPages && pagesRead < maxPages && await nextPage()) {
             await sleep(800);
             const page = await this._extractReport();
             page.tables.forEach((table, index) => {
@@ -1093,6 +1181,33 @@ class Client extends EventEmitter {
         }
         report.pagesRead = pagesRead;
         return report;
+    }
+
+    async _clickNextPage() {
+        for (const label of ['Next page', 'Go to next page', 'Página seguinte', 'Ir para a página seguinte']) {
+            if (await this._clickByLabel(label)) return true;
+        }
+        return this.pupPage.evaluate(() => {
+            const visible = (element) => {
+                const style = getComputedStyle(element);
+                const rect = element.getBoundingClientRect();
+                return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+            };
+            const counter = [...document.querySelectorAll('*')].find((element) =>
+                element.children.length === 0 && visible(element) &&
+                /^\d[\d,]*\s*[-–]\s*\d[\d,]*\s+(?:of|de)\s+\d[\d,]*$/i.test(element.textContent.trim()));
+            if (!counter) return false;
+            for (let container = counter.parentElement, depth = 0; container && depth < 5; container = container.parentElement, depth++) {
+                const right = [...container.querySelectorAll('button, [role="button"], [jsaction], [tabindex]')]
+                    .filter((element) => visible(element) && element.getBoundingClientRect().left > counter.getBoundingClientRect().right)
+                    .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
+                if (!right) continue;
+                if (right.disabled || right.getAttribute('aria-disabled') === 'true' || right.getAttribute('tabindex') === '-1') return false;
+                right.click();
+                return true;
+            }
+            return false;
+        });
     }
 
     async _setPerformanceDate({ period, startDate, endDate }) {

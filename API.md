@@ -127,6 +127,30 @@ Devolve cartões de páginas indexadas/não indexadas, gráfico, motivos, origem
 
 `GET /search-console/validations` é um alias orientado aos casos de validação. Para abrir um motivo ou iniciar um controlo disponível, use `/search-console/control` depois de ler o relatório.
 
+### `GET /search-console/indexing/pages`
+
+Reúne numa única resposta todas as URLs indexadas e todos os motivos de não indexação. Percorre automaticamente cada relatório e respetiva paginação, compara as linhas recolhidas com os totais do Google e responde com `complete=false` e HTTP 206 se a extração estiver incompleta.
+
+| Query | Valores |
+|---|---|
+| `status` | `all` (predefinição), `indexed` ou `not-indexed` |
+| `reason` | Texto contido no motivo, por exemplo `discovered`, `crawled`, `404` ou `redirect` |
+| `urlContains` | Texto contido na URL |
+| `language` | `pt` ou `es`, inferido pelo prefixo `/es` |
+| `crawled` | `true` para URLs com data de rastreio; `false` para URLs ainda sem rastreio |
+| `property` | Propriedade opcional |
+| `maxPages` | Limite de páginas por relatório, entre 1 e 500; predefinição `500` |
+
+```text
+GET /search-console/indexing/pages
+GET /search-console/indexing/pages?status=not-indexed&reason=discovered&language=es&crawled=false
+GET /search-console/indexing/pages?urlContains=%2Fguias%2F
+```
+
+Cada item de `pages[]` contém `url`, `status`, `reason` e `lastCrawled`. `summary` apresenta os totais globais e por motivo; `extraction` mostra, para cada grupo, quantas URLs eram esperadas e quantas foram recolhidas.
+
+`GET /search-console/indexing/pages.csv` aceita os mesmos filtros e exporta as linhas completas. Por segurança, o CSV responde com erro se a extração não estiver completa.
+
 ## Inspeção de URL
 
 ### `GET /search-console/url-inspection?url=https%3A%2F%2Fexample.com%2F`
