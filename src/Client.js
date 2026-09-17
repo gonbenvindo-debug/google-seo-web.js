@@ -368,15 +368,15 @@ class Client extends EventEmitter {
                 await this._googleAdsAction(['Discover new keywords', 'Descobrir novas palavras-chave']);
                 await this._googleAdsAction(keywords ? ['Start with keywords', 'Começar com palavras-chave'] : ['Start with a website', 'Começar com um Website']);
                 if (keywords) {
-                    await this._googleAdsAction(['Enter products or services', 'Enter keywords', 'Introduza produtos ou serviços'], keywords.join(', '), { exact: false });
+                    await this._googleAdsAction(['Search input', 'Enter products or services', 'Enter keywords', 'Introduza produtos ou serviços'], keywords.join(', '), { exact: false, submit: true });
                 }
                 if (website) {
                     await this._googleAdsAction(keywords
-                        ? ['Enter a domain to use as a filter', 'Enter your site', 'Introduza o seu site']
-                        : ['Enter a domain or a page', 'Enter a website', 'Introduza um domínio'], website, { exact: false });
+                        ? ['Enter a site to filter unrelated keywords', 'Enter a domain to use as a filter', 'Enter your site', 'Introduza o seu site']
+                        : ['Enter a site to filter unrelated keywords', 'Enter a domain or a page', 'Enter a website', 'Introduza um domínio'], website, { exact: false });
                     if (!keywords) await this._googleAdsAction(entireSite
                         ? ['Use the entire site', 'Utilizar todo o site']
-                        : ['Use only this page', 'Utilizar apenas esta página']);
+                        : ['Use only this page', 'Utilizar apenas esta página'], undefined, { exact: false, selector: '[role="radio"], input[type="radio"]' });
                 }
                 await this._googleAdsAction(['Get results', 'Obter resultados']);
             }
@@ -404,18 +404,25 @@ class Client extends EventEmitter {
 
     async _openGoogleAds(target) {
         this._requirePage();
+        if (!this.options.puppeteer.defaultViewport) await this.pupPage.setViewport({ width: 1440, height: 1000 });
         if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') await this.getStatus();
-        await this.pupPage.goto(this._googleAdsUrl(target), { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const requested = new URL(this._googleAdsUrl(target));
+        await this.pupPage.goto(requested.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await this._waitForGoogleAds();
         await this._requireGoogleAds();
+        const actual = new URL(this.pupPage.url()).pathname.replace(/\/$/, '');
+        const expected = requested.pathname.replace(/\/$/, '');
+        if (expected.startsWith('/aw/') && actual !== expected && !actual.startsWith(`${expected}/`)) {
+            throw Object.assign(new Error(`Google Ads redirected ${expected} to ${actual}; this report may not be available for the selected account. Inspect /google-ads/state or /google-ads/navigation.`), { status: 409 });
+        }
     }
 
     async _waitForGoogleAds() {
-        await this.pupPage.waitForNetworkIdle({ idleTime: 500, timeout: 10000 }).catch((error) => {
+        await this.pupPage.waitForNetworkIdle({ idleTime: 500, timeout: 3000 }).catch((error) => {
             if (error.name !== 'TimeoutError') throw error;
         });
         await this.pupPage.waitForFunction(() => document.body?.innerText.trim() &&
-            ![...document.querySelectorAll('[aria-busy="true"], [role="progressbar"]:not([aria-valuenow])')]
+            ![...document.querySelectorAll('[aria-busy="true"], material-progress [role="progressbar"]:not([aria-valuenow])')]
                 .some((element) => element.getBoundingClientRect().width && element.getBoundingClientRect().height &&
                     getComputedStyle(element).visibility !== 'hidden'), { timeout: 30000 });
     }
@@ -428,10 +435,10 @@ class Client extends EventEmitter {
         await this.getStatus();
     }
 
-    async _googleAdsAction(labels, text, { submit = false, exact = true } = {}) {
+    async _googleAdsAction(labels, text, { submit = false, exact = true, selector } = {}) {
         for (const label of labels) {
             const changed = text === undefined
-                ? await this._clickByLabel(label, { exact, unique: true })
+                ? await this._clickByLabel(label, { exact, unique: true, selector })
                 : await this._typeByLabel(label, text, { submit, exact, unique: true });
             if (!changed) continue;
             await this._waitForGoogleAds();
@@ -442,6 +449,8 @@ class Client extends EventEmitter {
 
     async _collectGoogleAdsReport(options = {}) {
         await this._requireGoogleAds();
+        await this.pupPage.evaluate(() => document.querySelector('table, [role="grid"]:has([role="columnheader"]), material-table')?.scrollIntoView({ block: 'start' }));
+        await sleep(400);
         const initial = await this._extractReport();
         const report = await this._collectCurrentReport(options);
         await this._requireGoogleAds();
@@ -1269,8 +1278,11 @@ class Client extends EventEmitter {
             const tableSelector = 'table, [role="table"], [role="grid"], material-table';
             let roots = [...document.querySelectorAll(tableSelector)]
                 .filter(visible)
+                .filter((root) => !root.matches('material-chips'))
+                .filter((root) => location.hostname !== 'ads.google.com' || !root.matches('[role="grid"]') || root.querySelector('[role="columnheader"]'))
                 .filter((root) => !root.parentElement?.closest(tableSelector));
-            if (!roots.length && document.querySelectorAll('[role="row"]').length > 1) roots = [document.body];
+            if (!roots.length && document.querySelectorAll('[role="row"]').length > 1 &&
+                (location.hostname !== 'ads.google.com' || document.querySelector('[role="columnheader"]'))) roots = [document.body];
             const tables = roots.map((root) => {
                 const rowElements = root.matches('table')
                     ? [...root.querySelectorAll('tr')]
@@ -1292,7 +1304,8 @@ class Client extends EventEmitter {
                     return cells.map((cell) => clean(cell.innerText || cell.textContent));
                 }).filter((row) => row.some(Boolean));
                 const headers = headerRow
-                    ? [...headerRow.querySelectorAll('th, [role="columnheader"], material-header-cell')].map((cell) => clean(cell.innerText))
+                    ? [...headerRow.querySelectorAll('th, [role="columnheader"], material-header-cell, :scope > [role="gridcell"]')]
+                        .map((cell) => clean(cell.getAttribute('aria-label') || cell.innerText))
                     : [];
                 return {
                     name: clean(root.getAttribute('aria-label') || root.querySelector('caption')?.innerText),
@@ -1399,7 +1412,8 @@ class Client extends EventEmitter {
             return false;
         };
         while (allPages && pagesRead < maxPages && await nextPage()) {
-            await sleep(800);
+            if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') await this._waitForGoogleAds();
+            else await sleep(800);
             let page = await this._extractReport();
             for (let attempt = 0; attempt < 5 && JSON.stringify([page.tables, page.paginations]) === signature; attempt++) {
                 await sleep(400);
@@ -1424,7 +1438,7 @@ class Client extends EventEmitter {
     }
 
     async _clickNextPage() {
-        for (const label of ['Next page', 'Go to next page', 'Página seguinte', 'Ir para a página seguinte']) {
+        for (const label of ['Next page', 'Go to next page', 'Go to the next page', 'Página seguinte', 'Ir para a página seguinte']) {
             if (await this._clickByLabel(label)) return true;
         }
         if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') return false;

@@ -152,7 +152,7 @@ curl -X POST http://127.0.0.1:3100/google-ads/keyword-ideas -H "Content-Type: ap
 
 Reports contain visible tables, metrics, charts, controls and links. `allPages=true` follows pagination up to `maxPages` (default 50, maximum 500). `complete=false` means partial data; `null` means completeness could not be verified. CSV requires verified completeness unless `allowPartial=true` is supplied.
 
-Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. Controls can save changes and affect advertising spend. See [Google Ads endpoints](API.md#google-ads-web-session) for account selection, parameters and limitations. Validated with controlled Chrome pages; verification with a real Ads account is still pending.
+Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. Controls can save changes and affect advertising spend. See [Google Ads endpoints](API.md#google-ads-web-session) for account selection, parameters and limitations. Shared login, keyword research, forecasts and CSV have been checked with a real Ads account. Unavailable reports that redirect elsewhere return HTTP 409.
 
 ### PageSpeed Insights
 

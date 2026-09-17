@@ -271,6 +271,8 @@ Every report name also has `GET /google-ads/<name>` and `GET /google-ads/<name>.
 
 Responses include `url`, `account`, `headings`, `metrics`, `tables`, `charts`, `controls`, `links`, `rawText`, `paginations`, `pagesRead`, `source` and `complete`. Values retain the UI's units, currency, date range and formatting. Numeric metrics are not normalized, and dates/filters are not reset automatically. Use controls to select dates, locations, languages, networks, columns or segments, then read `report=current`.
 
+If Google redirects a requested report to a different area (for example, an unavailable keywords report to the account overview), the endpoint returns HTTP 409. Check the account's permissions, campaign setup and current navigation. Default Ads navigation uses a 1440×1000 viewport and brings the table into view so Google renders its rows; a custom `puppeteer.defaultViewport` is respected.
+
 `complete=true` is reported only when a single table was collected from row 1 and its row count matches the visible pagination total. `false` returns HTTP 206; `null` means the UI did not supply enough evidence. Virtualized rows, hidden columns, unavailable reports and Google's own data limits are not bypassed. CSV returns HTTP 409 unless completeness is verified or `allowPartial=true` is explicitly requested. An unavailable table returns an error, not an empty successful export.
 
 ```text
@@ -323,6 +325,6 @@ The package exports `GoogleAdsReports`. The existing `Client` provides `getGoogl
 
 ### Verification and references
 
-The integration is checked with controlled Chrome pages and local HTTP requests, including shared-session routing, table extraction, pagination and error handling. Authenticated operation against a real Ads account has not yet been verified; Google UI changes and account-specific layouts may require selector updates.
+The integration is checked with controlled Chrome pages and local HTTP requests, including shared-session routing, table extraction, pagination and error handling. Live checks on 2026-09-17 verified persistent login, Ads account selection, reuse of the same session in Search Console, keyword ideas (319 rows across 32 pages), historical metrics, the forecast view and CSV output. Some campaign-related areas redirected to the overview in the tested account and were unavailable there. Google UI changes and account-specific layouts may still require selector updates.
 
 Google references: [Keyword Planner](https://support.google.com/google-ads/answer/7337243?hl=en), [reporting and report links](https://support.google.com/google-ads/answer/16470459?hl=en), [ad groups](https://support.google.com/google-ads/answer/2375452?hl=en), [account history](https://support.google.com/google-ads/answer/2454137?hl=en), [conversion goals](https://support.google.com/google-ads/answer/10995103?hl=en).

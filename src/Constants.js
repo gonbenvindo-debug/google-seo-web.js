@@ -73,7 +73,7 @@ exports.GoogleAdsReports = Object.freeze({
     attribution: 'attribution/overview',
     'change-history': 'changehistory',
     'keyword-planner': 'keywordplanner/home',
-    'data-manager': 'productlinks',
+    'data-manager': 'datamanager',
     preferences: 'preferences',
 });
 
