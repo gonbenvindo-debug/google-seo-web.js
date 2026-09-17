@@ -1,5 +1,7 @@
 # API HTTP
 
+For the Google Ads integration, see [Google Ads (web session)](#google-ads-web-session).
+
 Base local: `http://127.0.0.1:3100`. Se `GOOGLE_SEO_API_KEY` estiver definida, todos os pedidos exigem `Authorization: Bearer <chave>`. Todos os `POST` usam `Content-Type: application/json`.
 
 ## Sessão e controlo de baixo nível
@@ -214,3 +216,113 @@ GET /pagespeed/report?url=https%3A%2F%2Fiberflag.com%2F&strategy=desktop&categor
 ```
 
 `GET /pagespeed/report.csv` aceita as mesmas queries e exporta todas as auditorias.
+
+## Google Ads (web session)
+
+Google Ads uses the same persistent Chrome profile as Search Console. No separate OAuth application or developer token is used. Sign in with `POST /auth/login` and body `{"service":"google-ads"}`. Ads authentication does not require a Search Console property. A Google login does not grant access to an Ads account or complete its setup.
+
+### Accounts and navigation
+
+| Method | Path | Input / result |
+|---|---|---|
+| GET | `/google-ads/accounts` | Opens Google's account picker; returns visible account labels, customer IDs where shown, control IDs and available URLs |
+| POST | `/google-ads/account` | `{"url":"<account URL from the picker>"}`; navigates and returns the selected page |
+| GET | `/google-ads/reports` | Built-in report names and URLs; does not start a browser |
+| GET | `/google-ads/navigation` | Internal links from the current Ads page, including account-specific tools |
+| GET | `/google-ads/state` | Current text, headings, controls and account URL context |
+
+If the account picker provides a button without a URL, click its exact label with `/google-ads/control`, or use its ID with `/browser/click`. Do not construct an `euid` from a displayed customer ID: they are different identifiers. The selected URL's `euid`, `ocid` and `authuser` are preserved for subsequent report navigation. Explicit account parameters in an Ads URL replace, rather than merge with, the remembered context.
+
+The app has one active page; Ads operations are serialized. `/google-ads/state`, `/google-ads/navigation`, controls and `report=current` require that page to be on Ads. After reading GSC, reopen Ads via `/auth/login` or request a named Ads report. Existing `/browser/*` endpoints also work on Ads. If the session expires, call `/browser/stop`, then `/auth/login` with `{"service":"google-ads"}` to reopen the manual login flow.
+
+### Reports and CSV
+
+`GET /google-ads/report` and `GET /google-ads/report.csv` accept:
+
+| Query | Meaning |
+|---|---|
+| `report` | Name below, or `current` to preserve the current page and its filters; default `overview` |
+| `path` | Overrides `report`: relative Ads path, `/aw/...` path, or full `https://ads.google.com/aw/...` URL |
+| `allPages` | Follow visible Next page controls; default false for JSON, true for CSV |
+| `maxPages` | Maximum pages to read, 1–500; default 50 |
+| `table` | Zero-based CSV table index; default 0 |
+| `allowPartial` | CSV only: true explicitly permits exporting unverified or partial rows |
+
+Every report name also has `GET /google-ads/<name>` and `GET /google-ads/<name>.csv` shortcuts:
+
+| Name | Contents available in the UI |
+|---|---|
+| `overview` | Account/campaign overview and visible metrics |
+| `campaigns` | Campaigns, status, budgets and performance columns |
+| `ad-groups` | Ad groups and their performance |
+| `ads` | Ads, approval status and performance |
+| `keywords` | Search keywords, match types and visible quality/performance columns |
+| `search-terms` | Queries that triggered ads |
+| `landing-pages` | Landing-page URLs and performance |
+| `assets` | Asset associations and performance |
+| `ad-assets` | Ad-level responsive search ad asset details; may require selecting an ad |
+| `audiences` | Audience summary |
+| `conversions` | Conversion goals and actions |
+| `attribution` | Attribution overview |
+| `change-history` | Changes recorded by Google Ads |
+| `keyword-planner` | Planner home and saved plans available to the account |
+| `data-manager` | Product links / data connections |
+| `preferences` | Account preferences |
+
+Responses include `url`, `account`, `headings`, `metrics`, `tables`, `charts`, `controls`, `links`, `rawText`, `paginations`, `pagesRead`, `source` and `complete`. Values retain the UI's units, currency, date range and formatting. Numeric metrics are not normalized, and dates/filters are not reset automatically. Use controls to select dates, locations, languages, networks, columns or segments, then read `report=current`.
+
+`complete=true` is reported only when a single table was collected from row 1 and its row count matches the visible pagination total. `false` returns HTTP 206; `null` means the UI did not supply enough evidence. Virtualized rows, hidden columns, unavailable reports and Google's own data limits are not bypassed. CSV returns HTTP 409 unless completeness is verified or `allowPartial=true` is explicitly requested. An unavailable table returns an error, not an empty successful export.
+
+```text
+GET /google-ads/campaigns?allPages=true&maxPages=100
+GET /google-ads/report?report=current
+GET /google-ads/report.csv?report=current&table=0&allowPartial=true
+```
+
+To access other tools (for example recommendations, negative keywords, devices, locations, auction insights or billing), use links exposed by `/google-ads/navigation` or visible controls. These are UI operations, not dedicated typed CRUD APIs. Campaign creation, editing, pausing and deleting can be performed through the visible controls when the account permits them; there are no automatic campaign or budget changes in report reads.
+
+### Keyword research and forecasts
+
+`POST /google-ads/keyword-ideas`:
+
+```json
+{"keywords":["running shoes","trail shoes"],"website":"https://example.com/","allPages":true}
+```
+
+Use 1–10 seed `keywords`, a `website`, or both. Website-only mode accepts `entireSite` (default true); false selects only the supplied page. Each keyword must be a non-empty string of at most 200 characters.
+
+`POST /google-ads/keyword-forecast`:
+
+```json
+{"keywords":["running shoes","trail shoes"],"allPages":true,"maxPages":50}
+```
+
+Forecast mode accepts 1–1000 keywords and opens Google's “Get search volume and forecasts” flow. It can create a keyword plan in Google Ads, but does not publish a campaign. Both helpers return the resulting visible tables/charts; switch tabs with `/google-ads/control` to read historical metrics or forecasts when Google displays them on separate tabs. Actual Google limits may be lower.
+
+These helpers request the English interface and recognize selected English/Portuguese labels. They return HTTP 409 when required controls are unavailable; inspect `/google-ads/state` for changed labels, validation messages or setup requirements. Missing permissions, billing setup, consent prompts, captchas and verification must be completed manually. Helpers do not fabricate data or bypass these requirements. Keyword Planner values can be ranges rather than exact volumes.
+
+### Controls and filters
+
+`POST /google-ads/control` and `POST /google-ads/filter` accept the same body:
+
+```json
+{"label":"Add filter"}
+```
+
+```json
+{"label":"Search","text":"running shoes","exact":true,"submit":false}
+```
+
+Without `text`, the control is clicked. With `text`, the field is filled; `submit=true` presses Enter. `exact` defaults to true. Ambiguous labels are rejected; use `/browser/state` and `/browser/click` or `/browser/type` with a specific control ID instead. Responses contain the page after the action, not a guarantee that a change was saved. Inspect the result and any confirmation dialog.
+
+Saving campaign changes, applying recommendations, editing bids/budgets or enabling ads can affect spend. These are real account operations. Keep the API local and use `GOOGLE_SEO_API_KEY` to restrict access.
+
+### Library
+
+The package exports `GoogleAdsReports`. The existing `Client` provides `getGoogleAdsReports()`, `getGoogleAdsAccounts()`, `getGoogleAdsState()`, `getGoogleAdsReport(options)`, `planGoogleAdsKeywords(options)` and `controlGoogleAds(options)`.
+
+### Verification and references
+
+The integration is checked with controlled Chrome pages and local HTTP requests, including shared-session routing, table extraction, pagination and error handling. Authenticated operation against a real Ads account has not yet been verified; Google UI changes and account-specific layouts may require selector updates.
+
+Google references: [Keyword Planner](https://support.google.com/google-ads/answer/7337243?hl=en), [reporting and report links](https://support.google.com/google-ads/answer/16470459?hl=en), [ad groups](https://support.google.com/google-ads/answer/2375452?hl=en), [account history](https://support.google.com/google-ads/answer/2454137?hl=en), [conversion goals](https://support.google.com/google-ads/answer/10995103?hl=en).

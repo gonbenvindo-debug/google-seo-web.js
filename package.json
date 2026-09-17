@@ -1,13 +1,14 @@
 {
   "name": "google-seo-web.js",
   "version": "0.2.0",
-  "description": "Local, LLM-oriented browser controller for Google Search Console and SEO tools",
+  "description": "Local browser controller for Google Search Console, Google Ads and SEO tools",
   "main": "./index.js",
   "scripts": {
     "start": "node server.js"
   },
   "keywords": [
     "google-search-console",
+    "google-ads",
     "pagespeed-insights",
     "seo",
     "puppeteer",

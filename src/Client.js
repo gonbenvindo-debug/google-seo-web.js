@@ -10,6 +10,7 @@ const LocalAuth = require('./authStrategies/LocalAuth');
 const {
     AllowedHosts,
     Events,
+    GoogleAdsReports,
     LoginURL,
     SearchConsoleReports,
     Services,
@@ -45,30 +46,35 @@ class Client extends EventEmitter {
         this._destroying = false;
         this._pageQueue = Promise.resolve();
         this._searchConsoleResource = options.searchConsoleProperty || null;
+        this._googleAdsContext = {};
     }
 
     async initialize(target = this.options.defaultService) {
         if (this.pupBrowser) throw new Error('Client is already initialized');
+        const service = this.resolveTarget(target).service === 'google-ads' ? 'google-ads' : 'search-console';
+        const loginUrl = service === 'google-ads'
+            ? `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(Services[service].url)}`
+            : LoginURL;
         this._destroying = false;
         try {
             await this.authStrategy.beforeBrowserInitialized();
             await this._launchBrowser({ ...this.options.puppeteer, headless: true });
-            await this.pupPage.goto(Services['search-console'].url, {
+            await this.pupPage.goto(Services[service].url, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000,
             });
             await sleep(1000);
 
             let visibleLogin = false;
-            if (!(await this._isSearchConsoleAuthenticated())) {
+            if (!(await this._isServiceAuthenticated(service))) {
                 if (this.options.puppeteer.headless === false) {
                     await this._restartBrowser(this.options.puppeteer);
                     visibleLogin = true;
                 }
-                this.emit(Events.LOGIN_REQUIRED, { url: LoginURL });
-                await this.pupPage.goto(LoginURL, { waitUntil: 'domcontentloaded', timeout: 0 });
+                this.emit(Events.LOGIN_REQUIRED, { url: loginUrl });
+                await this.pupPage.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 0 });
                 try {
-                    await this._waitForAuthentication();
+                    await this._waitForAuthentication(service, loginUrl);
                 } catch (error) {
                     this.emit(Events.AUTHENTICATION_FAILURE, error.message);
                     throw error;
@@ -94,12 +100,12 @@ class Client extends EventEmitter {
 
             if (visibleLogin && this.options.headlessAfterLogin) {
                 await this._restartHeadless();
-                await this.pupPage.goto(Services['search-console'].url, {
+                await this.pupPage.goto(Services[service].url, {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000,
                 });
                 await sleep(1000);
-                if (!(await this._isSearchConsoleAuthenticated())) {
+                if (!(await this._isServiceAuthenticated(service))) {
                     throw new Error('Google session was not persisted after login');
                 }
             }
@@ -162,8 +168,14 @@ class Client extends EventEmitter {
         }
         const url = this.pupPage.url();
         try {
-            const resource = new URL(url).searchParams.get('resource_id');
+            const current = new URL(url);
+            const resource = current.hostname === 'search.google.com' && current.searchParams.get('resource_id');
             if (resource) this._searchConsoleResource = resource;
+            if (current.hostname === 'ads.google.com' && current.pathname.startsWith('/aw/')) {
+                this._googleAdsContext = Object.fromEntries(['euid', 'ocid', 'authuser']
+                    .filter((name) => current.searchParams.has(name))
+                    .map((name) => [name, current.searchParams.get(name)]));
+            }
         } catch {}
         const hasGoogleSession = await this._isAuthenticated();
         return {
@@ -222,6 +234,9 @@ class Client extends EventEmitter {
                 '[role="combobox"]',
                 '[role="tab"]',
                 '[role="menuitem"]',
+                '[role="option"]',
+                '[role="radio"]',
+                '[role="checkbox"]',
             ].join(','))]
                 .filter(visible)
                 .slice(0, maxElements)
@@ -269,6 +284,177 @@ class Client extends EventEmitter {
         }, { maxText, maxElements });
 
         return { ...(await this.getStatus()), ...page };
+    }
+
+    getGoogleAdsReports() {
+        return Object.entries(GoogleAdsReports).map(([name, path]) => ({ name, url: this._googleAdsUrl(path) }));
+    }
+
+    getGoogleAdsAccounts() {
+        return this._runPageTask(async () => {
+            await this._openGoogleAds('https://ads.google.com/nav/selectaccount');
+            const state = await this.getState({ maxElements: 1000 });
+            return {
+                ...state,
+                accounts: state.elements.filter(({ label, href }) =>
+                    /\b\d{3}-\d{3}-\d{4}\b/.test(label) ||
+                    (href && new URL(href).hostname === 'ads.google.com' && new URL(href).searchParams.has('euid')))
+                    .map(({ id, label, href }) => ({ id, label, url: href, customerId: label.match(/\b\d{3}-\d{3}-\d{4}\b/)?.[0] })),
+            };
+        });
+    }
+
+    getGoogleAdsState() {
+        return this._runPageTask(async () => {
+            await this._requireGoogleAds();
+            return { ...(await this.getState()), account: { ...this._googleAdsContext } };
+        });
+    }
+
+    getGoogleAdsReport({ report = 'overview', path, allPages = false, maxPages = 50 } = {}) {
+        return this._runPageTask(async () => {
+            if (typeof allPages !== 'boolean' || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
+                throw new TypeError('allPages must be boolean and maxPages must be an integer between 1 and 500');
+            }
+            if (path !== undefined) {
+                await this._openGoogleAds(path);
+            } else if (report !== 'current') {
+                if (!Object.hasOwn(GoogleAdsReports, report)) throw new TypeError(`Unknown Google Ads report: ${report}`);
+                await this._openGoogleAds(GoogleAdsReports[report]);
+            }
+            return this._collectGoogleAdsReport({ allPages, maxPages });
+        });
+    }
+
+    controlGoogleAds({ label, text, submit = false, exact = true } = {}) {
+        return this._runPageTask(async () => {
+            if (typeof label !== 'string' || !label.trim() || (text !== undefined && typeof text !== 'string') ||
+                typeof submit !== 'boolean' || typeof exact !== 'boolean') {
+                throw new TypeError('label must be a non-empty string; text a string; submit and exact booleans');
+            }
+            await this._requireGoogleAds();
+            await this._googleAdsAction([label], text, { submit, exact });
+            return this._collectGoogleAdsReport();
+        });
+    }
+
+    planGoogleAdsKeywords({ keywords, website, mode = 'ideas', entireSite = true, allPages = false, maxPages = 50 } = {}) {
+        if (!['ideas', 'forecast'].includes(mode)) throw new TypeError('mode must be ideas or forecast');
+        if (keywords !== undefined && (!Array.isArray(keywords) || !keywords.length || keywords.length > 1000 ||
+            keywords.some((keyword) => typeof keyword !== 'string' || !keyword.trim() || keyword.length > 200))) {
+            throw new TypeError('keywords must contain 1 to 1000 non-empty strings of at most 200 characters');
+        }
+        if ((!keywords && !website) || (mode === 'forecast' && (!keywords || website))) {
+            throw new TypeError('ideas requires keywords or website; forecast requires keywords without website');
+        }
+        if (mode === 'ideas' && keywords?.length > 10) throw new TypeError('Keyword ideas accepts at most 10 seed keywords');
+        if (typeof entireSite !== 'boolean' || typeof allPages !== 'boolean' ||
+            !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
+            throw new TypeError('entireSite and allPages must be booleans; maxPages must be between 1 and 500');
+        }
+        if (website !== undefined) {
+            const url = new URL(website);
+            if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+                throw new TypeError('website must be an HTTP(S) URL without credentials');
+            }
+        }
+        return this._runPageTask(async () => {
+            await this._openGoogleAds(GoogleAdsReports['keyword-planner']);
+            if (mode === 'forecast') {
+                await this._googleAdsAction(['Get search volume and forecasts', 'Obter volume de pesquisas e previsões']);
+                await this._googleAdsAction(['Enter or paste your keywords', 'Enter keywords', 'Introduza palavras-chave'], keywords.join('\n'), { exact: false });
+                await this._googleAdsAction(['Get started', 'Começar']);
+            } else {
+                await this._googleAdsAction(['Discover new keywords', 'Descobrir novas palavras-chave']);
+                await this._googleAdsAction(keywords ? ['Start with keywords', 'Começar com palavras-chave'] : ['Start with a website', 'Começar com um Website']);
+                if (keywords) {
+                    await this._googleAdsAction(['Enter products or services', 'Enter keywords', 'Introduza produtos ou serviços'], keywords.join(', '), { exact: false });
+                }
+                if (website) {
+                    await this._googleAdsAction(keywords
+                        ? ['Enter a domain to use as a filter', 'Enter your site', 'Introduza o seu site']
+                        : ['Enter a domain or a page', 'Enter a website', 'Introduza um domínio'], website, { exact: false });
+                    if (!keywords) await this._googleAdsAction(entireSite
+                        ? ['Use the entire site', 'Utilizar todo o site']
+                        : ['Use only this page', 'Utilizar apenas esta página']);
+                }
+                await this._googleAdsAction(['Get results', 'Obter resultados']);
+            }
+            const result = await this._collectGoogleAdsReport({ allPages, maxPages });
+            if (!result.tables.length && !result.charts.length) {
+                throw Object.assign(new Error('Keyword Planner returned no results; inspect /google-ads/state for account requirements or form errors'), { status: 409 });
+            }
+            return { ...result, mode };
+        });
+    }
+
+    _googleAdsUrl(target) {
+        if (typeof target !== 'string' || !target.trim()) throw new TypeError('Google Ads path must be a non-empty string');
+        const url = new URL(target, 'https://ads.google.com/aw/');
+        if (url.protocol !== 'https:' || url.hostname !== 'ads.google.com' || url.port || url.username || url.password ||
+            !(url.pathname.startsWith('/aw/') || url.pathname === '/nav/selectaccount')) {
+            throw new TypeError('Google Ads URL must use https://ads.google.com/aw/ or /nav/selectaccount');
+        }
+        if (!['euid', 'ocid', 'authuser'].some((name) => url.searchParams.has(name))) {
+            for (const [name, value] of Object.entries(this._googleAdsContext)) url.searchParams.set(name, value);
+        }
+        if (!url.searchParams.has('hl')) url.searchParams.set('hl', 'en');
+        return url.href;
+    }
+
+    async _openGoogleAds(target) {
+        this._requirePage();
+        if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') await this.getStatus();
+        await this.pupPage.goto(this._googleAdsUrl(target), { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await this._waitForGoogleAds();
+        await this._requireGoogleAds();
+    }
+
+    async _waitForGoogleAds() {
+        await this.pupPage.waitForNetworkIdle({ idleTime: 500, timeout: 10000 }).catch((error) => {
+            if (error.name !== 'TimeoutError') throw error;
+        });
+        await this.pupPage.waitForFunction(() => document.body?.innerText.trim() &&
+            ![...document.querySelectorAll('[aria-busy="true"], [role="progressbar"]:not([aria-valuenow])')]
+                .some((element) => element.getBoundingClientRect().width && element.getBoundingClientRect().height &&
+                    getComputedStyle(element).visibility !== 'hidden'), { timeout: 30000 });
+    }
+
+    async _requireGoogleAds() {
+        this._requirePage();
+        if (!(await this._isServiceAuthenticated('google-ads'))) {
+            throw Object.assign(new Error('Open Google Ads with POST /auth/login {"service":"google-ads"}; the current page is not an authenticated Ads page'), { status: 409 });
+        }
+        await this.getStatus();
+    }
+
+    async _googleAdsAction(labels, text, { submit = false, exact = true } = {}) {
+        for (const label of labels) {
+            const changed = text === undefined
+                ? await this._clickByLabel(label, { exact, unique: true })
+                : await this._typeByLabel(label, text, { submit, exact, unique: true });
+            if (!changed) continue;
+            await this._waitForGoogleAds();
+            return;
+        }
+        throw Object.assign(new Error(`Google Ads control not available: ${labels[0]}. Inspect /google-ads/state for current labels, permissions or setup requirements.`), { status: 409 });
+    }
+
+    async _collectGoogleAdsReport(options = {}) {
+        await this._requireGoogleAds();
+        const initial = await this._extractReport();
+        const report = await this._collectCurrentReport(options);
+        await this._requireGoogleAds();
+        const counts = report.paginations;
+        const singleTable = report.tables.length === 1 && counts.length === 1 && initial.pagination?.from === 1;
+        return {
+            ...report,
+            account: { ...this._googleAdsContext },
+            source: 'google-ads-web-ui',
+            complete: counts.some(({ to, total }) => to < total) ? false
+                : singleTable ? report.tables[0].rows.length === counts[0].total : null,
+            extraction: 'Rendered rows only; virtualized rows, hidden columns and unavailable reports may be missing. null completeness means the UI did not provide enough evidence.',
+        };
     }
 
     async getPageSpeedReport(target, {
@@ -864,6 +1050,7 @@ class Client extends EventEmitter {
     async resetSession() {
         await this.destroy();
         await this.authStrategy.logout();
+        this._googleAdsContext = {};
     }
 
     _runPageTask(task) {
@@ -996,17 +1183,17 @@ class Client extends EventEmitter {
         ].includes(name));
     }
 
-    async _waitForAuthentication() {
+    async _waitForAuthentication(service = 'search-console', loginUrl = LoginURL) {
         const started = Date.now();
         while (this.pupBrowser?.connected) {
             if (await this._isAuthenticated() && !this.pupPage.url().includes('accounts.google.com')) {
-                await this.pupPage.goto(Services['search-console'].url, {
+                await this.pupPage.goto(Services[service].url, {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000,
                 });
                 await sleep(1500);
-                if (await this._isSearchConsoleAuthenticated()) return;
-                await this.pupPage.goto(LoginURL, { waitUntil: 'domcontentloaded', timeout: 0 });
+                if (await this._isServiceAuthenticated(service)) return;
+                await this.pupPage.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 0 });
             }
             if (this.options.authTimeoutMs && Date.now() - started >= this.options.authTimeoutMs) {
                 throw new Error('Google login timed out');
@@ -1079,15 +1266,16 @@ class Client extends EventEmitter {
                 );
             };
             const bodyText = clean(document.body?.innerText, 100000);
-            let roots = [...document.querySelectorAll('table, [role="table"], [role="grid"]')]
+            const tableSelector = 'table, [role="table"], [role="grid"], material-table';
+            let roots = [...document.querySelectorAll(tableSelector)]
                 .filter(visible)
-                .filter((root) => !root.parentElement?.closest('table, [role="table"], [role="grid"]'));
+                .filter((root) => !root.parentElement?.closest(tableSelector));
             if (!roots.length && document.querySelectorAll('[role="row"]').length > 1) roots = [document.body];
             const tables = roots.map((root) => {
                 const rowElements = root.matches('table')
                     ? [...root.querySelectorAll('tr')]
-                    : [...root.querySelectorAll('[role="row"]')];
-                const headerRow = rowElements.find((row) => row.querySelector('th, [role="columnheader"]'));
+                    : [...root.querySelectorAll('[role="row"], material-row, material-header-row')];
+                const headerRow = rowElements.find((row) => row.querySelector('th, [role="columnheader"], material-header-cell'));
                 const rows = rowElements.filter((row) => visible(row) && row !== headerRow).map((row) => {
                     let cells = [...row.querySelectorAll([
                         ':scope > th',
@@ -1096,14 +1284,15 @@ class Client extends EventEmitter {
                         ':scope > [role="rowheader"]',
                         ':scope > [role="gridcell"]',
                         ':scope > [role="cell"]',
+                        ':scope > material-cell',
                     ].join(','))].filter(visible);
                     if (!cells.length) {
                         cells = [...row.children].filter((child) => visible(child) && clean(child.innerText));
                     }
-                    return cells.map((cell) => clean(cell.innerText || cell.textContent)).filter(Boolean);
-                }).filter((row) => row.length);
+                    return cells.map((cell) => clean(cell.innerText || cell.textContent));
+                }).filter((row) => row.some(Boolean));
                 const headers = headerRow
-                    ? [...headerRow.querySelectorAll('th, [role="columnheader"]')].map((cell) => clean(cell.innerText)).filter(Boolean)
+                    ? [...headerRow.querySelectorAll('th, [role="columnheader"], material-header-cell')].map((cell) => clean(cell.innerText))
                     : [];
                 return {
                     name: clean(root.getAttribute('aria-label') || root.querySelector('caption')?.innerText),
@@ -1114,12 +1303,15 @@ class Client extends EventEmitter {
             const controls = [...document.querySelectorAll([
                 'button',
                 'input',
+                'textarea',
                 'select',
                 '[role="button"]',
                 '[role="radio"]',
                 '[role="tab"]',
                 '[role="combobox"]',
                 '[role="menuitem"]',
+                '[role="checkbox"]',
+                '[role="textbox"]',
             ].join(','))]
                 .filter(visible)
                 .map((element) => ({
@@ -1184,7 +1376,8 @@ class Client extends EventEmitter {
         });
         return {
             ...(await this.getStatus()),
-            property: this._searchConsoleProperty(),
+            ...(this._serviceForUrl(this.pupPage.url()) === 'search-console'
+                ? { property: this._searchConsoleProperty() } : {}),
             ...report,
         };
     }
@@ -1196,6 +1389,7 @@ class Client extends EventEmitter {
         }
         const report = await this._extractReport();
         let pagesRead = 1;
+        let signature = JSON.stringify([report.tables, report.paginations]);
         const nextPage = async () => {
             for (let attempt = 0; attempt < 5; attempt++) {
                 const clicked = await this._clickNextPage();
@@ -1206,7 +1400,14 @@ class Client extends EventEmitter {
         };
         while (allPages && pagesRead < maxPages && await nextPage()) {
             await sleep(800);
-            const page = await this._extractReport();
+            let page = await this._extractReport();
+            for (let attempt = 0; attempt < 5 && JSON.stringify([page.tables, page.paginations]) === signature; attempt++) {
+                await sleep(400);
+                page = await this._extractReport();
+            }
+            const nextSignature = JSON.stringify([page.tables, page.paginations]);
+            if (nextSignature === signature) break;
+            signature = nextSignature;
             page.tables.forEach((table, index) => {
                 if (!report.tables[index]) return report.tables.push(table);
                 const existing = new Set(report.tables[index].rows.map((row) => JSON.stringify(row)));
@@ -1226,6 +1427,7 @@ class Client extends EventEmitter {
         for (const label of ['Next page', 'Go to next page', 'Página seguinte', 'Ir para a página seguinte']) {
             if (await this._clickByLabel(label)) return true;
         }
+        if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') return false;
         return this.pupPage.evaluate(() => {
             const visible = (element) => {
                 const style = getComputedStyle(element);
@@ -1353,9 +1555,9 @@ class Client extends EventEmitter {
         await sleep(1000);
     }
 
-    async _clickByLabel(label, { exact = true, selector } = {}) {
+    async _clickByLabel(label, { exact = true, selector, unique = false } = {}) {
         this._requirePage();
-        return this.pupPage.evaluate(({ label, exact, selector }) => {
+        return this.pupPage.evaluate(({ label, exact, selector, unique }) => {
             const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
             const visible = (element) => {
                 const style = getComputedStyle(element);
@@ -1368,31 +1570,35 @@ class Client extends EventEmitter {
                 element.innerText || element.textContent,
             );
             const wanted = clean(label).toLowerCase();
-            const element = [...document.querySelectorAll(selector || [
+            const matches = [...document.querySelectorAll(selector || [
                 'button',
                 'a[href]',
                 'input[type="radio"]',
+                'input[type="checkbox"]',
                 'tr',
                 '[role="button"]',
                 '[role="row"]',
                 '[role="tab"]',
                 '[role="menuitem"]',
                 '[role="option"]',
-            ].join(','))].find((candidate) => {
+                '[role="radio"]',
+                '[role="checkbox"]',
+            ].join(','))].filter((candidate) => {
                 const actual = labelFor(candidate).toLowerCase();
                 return visible(candidate) &&
                     !candidate.disabled && candidate.getAttribute('aria-disabled') !== 'true' &&
                     (exact ? actual === wanted : actual.includes(wanted));
             });
-            if (!element) return false;
-            element.click();
+            if (unique && matches.length > 1) throw new TypeError(`Ambiguous control label: ${label}; use an ID from /browser/state`);
+            if (!matches.length) return false;
+            matches[0].click();
             return true;
-        }, { label, exact, selector });
+        }, { label, exact, selector, unique });
     }
 
-    async _typeByLabel(label, text, { submit = false, exact = false } = {}) {
+    async _typeByLabel(label, text, { submit = false, exact = false, unique = false } = {}) {
         this._requirePage();
-        const changed = await this.pupPage.evaluate(({ label, text, exact }) => {
+        const changed = await this.pupPage.evaluate(({ label, text, exact, unique }) => {
             const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
             const visible = (element) => {
                 const style = getComputedStyle(element);
@@ -1400,15 +1606,19 @@ class Client extends EventEmitter {
                 return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
             };
             const wanted = clean(label).toLowerCase();
-            const element = [...document.querySelectorAll('input, textarea, [role="textbox"], [contenteditable="true"]')]
-                .find((candidate) => {
+            const matches = [...document.querySelectorAll('input:not([type="password"]), textarea, [role="textbox"], [contenteditable="true"]')]
+                .filter((candidate) => {
                     const actual = clean(
                         candidate.getAttribute('aria-label') ||
                         (candidate.id && document.querySelector(`label[for="${CSS.escape(candidate.id)}"]`)?.innerText) ||
                         candidate.getAttribute('placeholder'),
                     ).toLowerCase();
-                    return visible(candidate) && !candidate.disabled && (exact ? actual === wanted : actual.includes(wanted));
+                    return visible(candidate) && !candidate.disabled && !candidate.readOnly &&
+                        candidate.getAttribute('aria-disabled') !== 'true' &&
+                        candidate.getAttribute('type') !== 'password' && (exact ? actual === wanted : actual.includes(wanted));
                 });
+            if (unique && matches.length > 1) throw new TypeError(`Ambiguous field label: ${label}; use an ID from /browser/state`);
+            const element = matches[0];
             if (!element) return false;
             element.focus();
             if ('value' in element) {
@@ -1420,9 +1630,17 @@ class Client extends EventEmitter {
             element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
             element.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
-        }, { label, text, exact });
+        }, { label, text, exact, unique });
         if (changed && submit) await this.pupPage.keyboard.press('Enter');
         return changed;
+    }
+
+    async _isServiceAuthenticated(service) {
+        if (service !== 'google-ads') return this._isSearchConsoleAuthenticated();
+        if (!this.pupPage || !(await this._isAuthenticated())) return false;
+        const url = new URL(this.pupPage.url());
+        return url.hostname === 'ads.google.com' &&
+            (url.pathname.startsWith('/aw/') || url.pathname === '/nav/selectaccount');
     }
 
     async _isSearchConsoleAuthenticated() {
@@ -1482,6 +1700,7 @@ class Client extends EventEmitter {
     }
 
     _serviceForUrl(url) {
+        if (new URL(url).hostname === 'ads.google.com') return 'google-ads';
         return Object.entries(Services)
             .find(([, service]) => {
                 const prefix = service.url.replace(/\/$/, '');

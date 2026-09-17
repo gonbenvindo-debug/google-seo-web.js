@@ -2,7 +2,7 @@
 
 const { timingSafeEqual } = require('crypto');
 const http = require('http');
-const { Client, LocalAuth, Services } = require('./');
+const { Client, LocalAuth, Services, GoogleAdsReports } = require('./');
 
 const jsonRoutes = new Set([
     'POST /auth/login',
@@ -18,6 +18,11 @@ const jsonRoutes = new Set([
     'POST /search-console/filter',
     'POST /search-console/sitemaps',
     'POST /search-console/url-inspection',
+    'POST /google-ads/account',
+    'POST /google-ads/control',
+    'POST /google-ads/filter',
+    'POST /google-ads/keyword-ideas',
+    'POST /google-ads/keyword-forecast',
 ]);
 
 function hasValidKey(authorization, apiKey) {
@@ -81,12 +86,15 @@ function toCsv(report, tableIndex = 0) {
 function createApiServer(client, { apiKey } = {}) {
     let starting;
     const start = async (target) => {
-        if (!client.pupBrowser && !starting) {
+        if (starting) {
+            await starting;
+            if (target) await client.open(target);
+        } else if (!client.pupBrowser) {
             starting = client.initialize(target).finally(() => { starting = null; });
+            await starting;
         } else if (client.pupBrowser && target) {
             await client.open(target);
         }
-        if (starting) await starting;
         return client.getStatus();
     };
 
@@ -125,7 +133,11 @@ function createApiServer(client, { apiKey } = {}) {
             const url = new URL(request.url, 'http://localhost');
             const route = `${request.method} ${url.pathname}`;
             const body = jsonRoutes.has(route) ? await readJson(request) : {};
+            if (jsonRoutes.has(route) && (!body || typeof body !== 'object' || Array.isArray(body))) {
+                throw new TypeError('JSON body must be an object');
+            }
             const ensureSearchConsole = async () => {
+                if (starting) await starting;
                 if (!client.pupBrowser) await start('search-console');
             };
             const reportOptions = () => ({
@@ -167,6 +179,7 @@ function createApiServer(client, { apiKey } = {}) {
                 return sendJson(200, await client.getStatus());
             }
             if (route === 'GET /services') return sendJson(200, Services);
+            if (route === 'GET /google-ads/reports') return sendJson(200, client.getGoogleAdsReports());
             if (route === 'POST /auth/login' || route === 'POST /browser/start') {
                 return sendJson(200, await start(body.target || body.service || 'search-console'));
             }
@@ -320,6 +333,55 @@ function createApiServer(client, { apiKey } = {}) {
             if (route === 'POST /search-console/control' || route === 'POST /search-console/filter') {
                 await ensureSearchConsole();
                 return sendJson(200, await client.controlSearchConsole(body));
+            }
+            const adsReport = url.pathname.match(/^\/google-ads\/([^/]+?)(\.csv)?$/);
+            const isAdsReport = request.method === 'GET' && adsReport &&
+                (adsReport[1] === 'report' || Object.hasOwn(GoogleAdsReports, adsReport[1]));
+            if (isAdsReport || [
+                'GET /google-ads/accounts', 'GET /google-ads/state', 'GET /google-ads/navigation',
+                'POST /google-ads/account', 'POST /google-ads/control', 'POST /google-ads/filter',
+                'POST /google-ads/keyword-ideas', 'POST /google-ads/keyword-forecast',
+            ].includes(route)) {
+                const allPages = booleanParam(url.searchParams, 'allPages', Boolean(adsReport?.[2]));
+                const maxPages = integerParam(url.searchParams, 'maxPages', 50);
+                if (maxPages < 1 || maxPages > 500) throw new TypeError('maxPages must be between 1 and 500');
+                const table = integerParam(url.searchParams, 'table', 0);
+                if (table < 0) throw new TypeError('table must not be negative');
+                const allowPartial = booleanParam(url.searchParams, 'allowPartial');
+                if (route === 'POST /google-ads/account' && (typeof body.url !== 'string' || !body.url)) {
+                    throw new TypeError('url is required; use an account link returned by /google-ads/accounts');
+                }
+                if (starting) await starting;
+                if (!client.pupBrowser) await start('google-ads');
+                if (route === 'GET /google-ads/accounts') return sendJson(200, await client.getGoogleAdsAccounts());
+                if (route === 'GET /google-ads/state') return sendJson(200, await client.getGoogleAdsState());
+                if (route === 'GET /google-ads/navigation') {
+                    const report = await client.getGoogleAdsReport({ report: 'current' });
+                    return sendJson(200, { url: report.url, account: report.account, links: report.links.filter(({ url }) => {
+                        const target = new URL(url);
+                        return target.protocol === 'https:' && target.hostname === 'ads.google.com' && target.pathname.startsWith('/aw/');
+                    }) });
+                }
+                if (route === 'POST /google-ads/control' || route === 'POST /google-ads/filter') {
+                    return sendJson(200, await client.controlGoogleAds(body));
+                }
+                if (route === 'POST /google-ads/keyword-ideas' || route === 'POST /google-ads/keyword-forecast') {
+                    const report = await client.planGoogleAdsKeywords({ ...body, mode: route.endsWith('keyword-ideas') ? 'ideas' : 'forecast' });
+                    return sendJson(report.complete === false ? 206 : 200, report);
+                }
+                const report = await client.getGoogleAdsReport({
+                    report: adsReport?.[1] === 'report' ? (url.searchParams.get('report') || 'overview') : adsReport?.[1],
+                    path: route === 'POST /google-ads/account' ? body.url : url.searchParams.get('path') || undefined,
+                    allPages,
+                    maxPages,
+                });
+                if (adsReport?.[2]) {
+                    if (report.complete !== true && !allowPartial) {
+                        return sendJson(409, { error: 'Cannot verify a complete export. Inspect the JSON report, or set allowPartial=true to export rendered rows.' });
+                    }
+                    return sendCsv(toCsv(report, table), `google-ads-${adsReport[1]}.csv`);
+                }
+                return sendJson(report.complete === false ? 206 : 200, report);
             }
             if (route === 'GET /pagespeed/report' || route === 'GET /pagespeed/report.csv') {
                 const target = url.searchParams.get('url');

@@ -7,6 +7,10 @@ exports.Services = Object.freeze({
         name: 'Google Search Console',
         url: 'https://search.google.com/search-console/',
     },
+    'google-ads': {
+        name: 'Google Ads',
+        url: 'https://ads.google.com/aw/overview',
+    },
     pagespeed: {
         name: 'PageSpeed Insights',
         url: 'https://pagespeed.web.dev/',
@@ -54,7 +58,27 @@ exports.SearchConsoleReports = Object.freeze({
     settings: 'settings',
 });
 
+exports.GoogleAdsReports = Object.freeze({
+    overview: 'overview',
+    campaigns: 'campaigns',
+    'ad-groups': 'adgroups',
+    ads: 'ads',
+    keywords: 'keywords',
+    'search-terms': 'keywords/searchterms',
+    'landing-pages': 'landingpages',
+    assets: 'assetreport/associations/allupgraded',
+    'ad-assets': 'unifiedassetreport/rsaassetdetails',
+    audiences: 'audiences/summary',
+    conversions: 'conversions',
+    attribution: 'attribution/overview',
+    'change-history': 'changehistory',
+    'keyword-planner': 'keywordplanner/home',
+    'data-manager': 'productlinks',
+    preferences: 'preferences',
+});
+
 exports.AllowedHosts = new Set([
+    'ads.google.com',
     'search.google.com',
     'pagespeed.web.dev',
     'merchants.google.com',

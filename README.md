@@ -1,13 +1,13 @@
 # google-seo-web.js
 
-`google-seo-web.js` is a local Node.js API and browser controller for Google Search Console, PageSpeed Insights, and other Google SEO tools.
+`google-seo-web.js` is a local Node.js API and browser controller for Google Search Console, Google Ads, PageSpeed Insights, and other Google SEO tools.
 
 It keeps a persistent Chromium session, lets you complete Google login manually, and exposes JSON and CSV endpoints for reports, indexing, sitemaps, URL inspection, PageSpeed, and browser control.
 
 ## Requirements
 
 - Node.js 22.12 or newer
-- Chromium or Google Chrome
+- Google Chrome on Windows; Puppeteer's Chromium on other platforms
 
 ## Install and run
 
@@ -122,6 +122,37 @@ POST /search-console/sitemaps
 ```
 
 `action: "index"` requests indexing. These actions affect external Google data.
+
+### Google Ads
+
+Reuse the same Google session by calling `POST /auth/login` with `{"service":"google-ads"}`. An existing Ads account with access to the requested tools is required. This integration uses the web interface, not the Google Ads API.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/google-ads/accounts` | Open the account picker and read visible accounts |
+| POST | `/google-ads/account` | Select an account using its returned `url` |
+| GET | `/google-ads/reports` | List report names and URLs |
+| GET | `/google-ads/navigation` | Read links on the current Ads page |
+| GET | `/google-ads/state` | Read current page and control IDs |
+| GET | `/google-ads/report` | Read a named report, an Ads `path`, or `report=current` |
+| GET | `/google-ads/report.csv` | Export a report table |
+| GET | `/google-ads/{report}` | Shortcut for any report below; also supports `.csv` |
+| POST | `/google-ads/keyword-ideas` | Discover keywords from `keywords` and/or `website` |
+| POST | `/google-ads/keyword-forecast` | Submit `keywords` for volume and forecasts |
+| POST | `/google-ads/control` | Click a `label` or fill it with `text`; optional `submit` |
+| POST | `/google-ads/filter` | Same control operation, for visible filter fields |
+
+Reports: `overview`, `campaigns`, `ad-groups`, `ads`, `keywords`, `search-terms`, `landing-pages`, `assets`, `ad-assets`, `audiences`, `conversions`, `attribution`, `change-history`, `keyword-planner`, `data-manager`, `preferences`.
+
+```bash
+curl -X POST http://127.0.0.1:3100/auth/login -H "Content-Type: application/json" -d '{"service":"google-ads"}'
+curl 'http://127.0.0.1:3100/google-ads/search-terms?allPages=true'
+curl -X POST http://127.0.0.1:3100/google-ads/keyword-ideas -H "Content-Type: application/json" -d '{"keywords":["running shoes","trail shoes"]}'
+```
+
+Reports contain visible tables, metrics, charts, controls and links. `allPages=true` follows pagination up to `maxPages` (default 50, maximum 500). `complete=false` means partial data; `null` means completeness could not be verified. CSV requires verified completeness unless `allowPartial=true` is supplied.
+
+Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. Controls can save changes and affect advertising spend. See [Google Ads endpoints](API.md#google-ads-web-session) for account selection, parameters and limitations. Validated with controlled Chrome pages; verification with a real Ads account is still pending.
 
 ### PageSpeed Insights
 
