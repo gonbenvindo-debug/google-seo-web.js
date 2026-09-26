@@ -4,7 +4,8 @@
   "description": "Local browser controller for Google Search Console, Google Ads and SEO tools",
   "main": "./index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "keywords": [
     "google-search-console",

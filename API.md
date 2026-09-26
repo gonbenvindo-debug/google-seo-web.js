@@ -1,8 +1,69 @@
 # API HTTP
 
-For the Google Ads integration, see [Google Ads (web session)](#google-ads-web-session).
+For the Google Ads integration, see [Google Ads (web session)](#google-ads-web-session). Merchant Center's browser integration is described in [Google Merchant Center (web session)](#google-merchant-center-web-session).
 
 Base local: `http://127.0.0.1:3100`. Se `GOOGLE_SEO_API_KEY` estiver definida, todos os pedidos exigem `Authorization: Bearer <chave>`. Todos os `POST` usam `Content-Type: application/json`.
+
+## REST APIs Google (OAuth opcional)
+
+Estas rotas chamam diretamente as APIs oficiais e funcionam independentemente da sessão de Chromium. Configure `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` e `GOOGLE_OAUTH_REFRESH_TOKEN`; o refresh token deve ter as permissões `https://www.googleapis.com/auth/content` e `https://www.googleapis.com/auth/adwords`. O `.env` é ignorado pelo Git; use `.env.example` como modelo. Também é possível definir temporariamente `GOOGLE_ACCESS_TOKEN` para testes locais.
+
+### Merchant API
+
+Passe o caminho REST depois de `/api/merchant/`; método, query string e corpo JSON seguem o recurso da Google:
+
+```text
+GET    /api/merchant/accounts/v1/accounts
+GET    /api/merchant/products/v1/accounts/{accountId}/products?pageSize=100
+GET    /api/merchant/products/v1/accounts/{accountId}/products/{productId}
+POST   /api/merchant/products/v1/accounts/{accountId}/productInputs:insert
+PATCH  /api/merchant/products/v1/accounts/{accountId}/productInputs/{productInputId}?updateMask=title,description
+DELETE /api/merchant/products/v1/accounts/{accountId}/productInputs/{productInputId}
+GET    /api/merchant/datasources/v1/accounts/{accountId}/dataSources
+POST   /api/merchant/datasources/v1/accounts/{accountId}/dataSources/{dataSourceId}:fetch
+POST   /api/merchant/reports/v1/accounts/{accountId}/reports:search
+GET    /api/merchant/promotions/v1/accounts/{accountId}/promotions
+POST   /api/merchant/promotions/v1/accounts/{accountId}/promotions:insert
+GET    /api/merchant/conversions/v1/accounts/{accountId}/conversionSources
+GET    /api/merchant/quota/v1/accounts/{accountId}/quotas
+```
+
+Todos os métodos GET/POST/PATCH/DELETE são encaminhados para `merchantapi.googleapis.com`; os namespaces permitidos cobrem `accounts`, `products`, `reports`, `datasources`, `inventories`, `conversions`, `notifications`, `promotions`, `quota`, `ordertracking` e `productstudio`. O recurso e as permissões continuam sujeitos à API oficial e à conta autenticada. O corpo das operações mutáveis é JSON.
+
+### Google Ads API
+
+Google Ads requer `GOOGLE_ADS_DEVELOPER_TOKEN`. Configure ainda `GOOGLE_ADS_LOGIN_CUSTOMER_ID` se a conta anunciada estiver sob uma conta de gestor. O ID de cliente na URL usa apenas dígitos. A versão predefinida é `v24`, configurável através de `GOOGLE_ADS_API_VERSION`.
+
+```http
+GET /api/google-ads/customers:listAccessibleCustomers
+
+POST /api/google-ads/{customerId}/googleAds:search
+Content-Type: application/json
+
+{"query":"SELECT campaign.id, campaign.name, campaign.status FROM campaign ORDER BY campaign.id"}
+```
+
+```http
+POST /api/google-ads/{customerId}/googleAds:searchStream
+POST /api/google-ads/{customerId}/campaigns:mutate
+POST /api/google-ads/{customerId}/campaignBudgets:mutate
+POST /api/google-ads/{customerId}/adGroups:mutate
+POST /api/google-ads/{customerId}/adGroupAds:mutate
+POST /api/google-ads/{customerId}/adGroupCriteria:mutate
+POST /api/google-ads/{customerId}/campaignCriteria:mutate
+POST /api/google-ads/{customerId}/assets:mutate
+POST /api/google-ads/{customerId}/conversionActions:mutate
+POST /api/google-ads/{customerId}/conversionUploads:uploadClickConversions
+POST /api/google-ads/{customerId}/conversionUploads:uploadCallConversions
+POST /api/google-ads/{customerId}/offlineUserDataJobs:create
+POST /api/google-ads/{customerId}/offlineUserDataJobs/{jobId}:addOperations
+POST /api/google-ads/{customerId}/offlineUserDataJobs/{jobId}:run
+POST /api/google-ads/{customerId}:generateKeywordIdeas
+```
+
+`search` and `searchStream` accept the Google Ads REST request JSON; resource actions and supported customer-level actions are passed through to their corresponding official methods. This covers the generic mutate method for supported resources plus special operations such as conversion uploads and offline user data jobs. Google Ads actions can change campaigns, bids and spend. The server validates the customer ID and method path; errors retain Google's HTTP status and response payload. Direct API credentials are not supplied with this project.
+
+Official references: [Merchant API REST resources](https://developers.google.com/merchant/api/reference/rest), [Google Ads API REST overview](https://developers.google.com/google-ads/api/rest/overview), [Google Ads API OAuth](https://developers.google.com/google-ads/api/docs/oauth/overview).
 
 ## Sessão e controlo de baixo nível
 
@@ -217,6 +278,57 @@ GET /pagespeed/report?url=https%3A%2F%2Fiberflag.com%2F&strategy=desktop&categor
 
 `GET /pagespeed/report.csv` aceita as mesmas queries e exporta todas as auditorias.
 
+## Google Merchant Center (web session)
+
+These endpoints use the same persistent Google Chrome profile as Search Console and Google Ads. Start the manual sign-in flow with `POST /auth/login` and `{ "service": "merchant-center" }`. They automate the Merchant Center web UI; they do **not** call Google's Merchant API and do not require an API token. UI routes, labels and available data can vary by account and Google rollout.
+
+### Navigation and account context
+
+| Method | Path | Input / result |
+|---|---|---|
+| GET | `/merchant-center/reports` | Names of built-in report/section shortcuts; no browser required |
+| GET | `/merchant-center/state` | Current page text, headings, controls, account context and URL |
+| GET | `/merchant-center/navigation` | Links visible in the signed-in account, restricted to `merchants.google.com` |
+| POST | `/merchant-center/navigate` | `{ "target": "<Merchant Center path or URL>" }`; rejects other hosts |
+
+The single browser page is shared with every Google integration. Read `/merchant-center/navigation` to discover current account-specific links and pass a returned URL to `/merchant-center/navigate`. The endpoint validates the destination host. If the login has expired or the current page is not Merchant Center, the API returns HTTP 409 and prompts a new login.
+
+### Reports and CSV
+
+`GET /merchant-center/report` accepts `report` (default `overview`), `path` (a relative path or full Merchant Center URL), `allPages` and `maxPages` (1–500). Named sections also have shortcuts:
+
+| Name | Section |
+|---|---|
+| `overview` | Account overview |
+| `products` | Product catalog and statuses |
+| `diagnostics` | Product issues and diagnostics |
+| `performance` | Analytics and product performance |
+| `marketing` | Marketing methods |
+| `campaigns` | Ad campaign management |
+| `promotions` | Promotions |
+| `data-sources` | Product data sources |
+| `shipping-returns` | Shipping and returns settings |
+| `notifications` | Account notifications |
+| `settings` | Account settings |
+
+Example routes: `GET /merchant-center/products?allPages=true`, `GET /merchant-center/report?path=<encoded-path>`, and `GET /merchant-center/products.csv?allowPartial=true`. CSV requires verified completeness unless `allowPartial=true`; JSON returns 206 when pagination proves the report incomplete. Rendered UI extraction may omit virtualized rows or hidden columns.
+
+### Controls
+
+`POST /merchant-center/control` and `/merchant-center/filter` accept the same body:
+
+```json
+{"label":"Products"}
+```
+
+```json
+{"label":"Search products","text":"flag","submit":true,"exact":false}
+```
+
+Read `/merchant-center/state` first to use labels shown by the live interface. Clicking, submitting, saving or changing settings affects the real Merchant Center account; the endpoint does not silently save or confirm a change.
+
+For direct API use, see [Merchant API REST resources](https://developers.google.com/merchant/api/reference/rest). That API uses OAuth scopes and its own supported resource methods. This package's web-session endpoints are a separate integration.
+
 ## Google Ads (web session)
 
 Google Ads uses the same persistent Chrome profile as Search Console. No separate OAuth application or developer token is used. Sign in with `POST /auth/login` and body `{"service":"google-ads"}`. Ads authentication does not require a Search Console property. A Google login does not grant access to an Ads account or complete its setup.
@@ -268,6 +380,18 @@ Every report name also has `GET /google-ads/<name>` and `GET /google-ads/<name>.
 | `keyword-planner` | Planner home and saved plans available to the account |
 | `data-manager` | Product links / data connections |
 | `preferences` | Account preferences |
+| `recommendations` | Recommendations |
+| `budgets` | Campaign budgets |
+| `devices` | Device performance |
+| `geographic` | Geographic performance |
+| `demographics` | Demographic performance |
+| `placements` | Placement performance |
+| `negative-keywords` | Negative keywords |
+| `asset-groups` | Performance Max asset groups |
+| `shopping-products` | Shopping product reporting |
+| `conversion-goals` | Conversion actions and goals |
+| `billing` | Billing summary |
+| `campaign-diagnostics` | Campaign overview/diagnostics |
 
 Responses include `url`, `account`, `headings`, `metrics`, `tables`, `charts`, `controls`, `links`, `rawText`, `paginations`, `pagesRead`, `source` and `complete`. Values retain the UI's units, currency, date range and formatting. Numeric metrics are not normalized, and dates/filters are not reset automatically. Use controls to select dates, locations, languages, networks, columns or segments, then read `report=current`.
 
@@ -327,4 +451,4 @@ The package exports `GoogleAdsReports`. The existing `Client` provides `getGoogl
 
 The integration is checked with controlled Chrome pages and local HTTP requests, including shared-session routing, table extraction, pagination and error handling. Live checks on 2026-09-17 verified persistent login, Ads account selection, reuse of the same session in Search Console, keyword ideas (319 rows across 32 pages), historical metrics, the forecast view and CSV output. Some campaign-related areas redirected to the overview in the tested account and were unavailable there. Google UI changes and account-specific layouts may still require selector updates.
 
-Google references: [Keyword Planner](https://support.google.com/google-ads/answer/7337243?hl=en), [reporting and report links](https://support.google.com/google-ads/answer/16470459?hl=en), [ad groups](https://support.google.com/google-ads/answer/2375452?hl=en), [account history](https://support.google.com/google-ads/answer/2454137?hl=en), [conversion goals](https://support.google.com/google-ads/answer/10995103?hl=en).
+Google references: [Google Ads REST API](https://developers.google.com/google-ads/api/rest/overview), [Keyword Planner](https://support.google.com/google-ads/answer/7337243?hl=en), [reporting and report links](https://support.google.com/google-ads/answer/16470459?hl=en), [ad groups](https://support.google.com/google-ads/answer/2375452?hl=en), [account history](https://support.google.com/google-ads/answer/2454137?hl=en), [conversion goals](https://support.google.com/google-ads/answer/10995103?hl=en).

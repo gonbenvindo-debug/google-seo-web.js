@@ -41,6 +41,12 @@ curl http://127.0.0.1:3100/browser/state
 | `GOOGLE_SEO_API_PORT` | `3100` | Local API port |
 | `GOOGLE_SEO_API_KEY` | empty | Protects the API with a Bearer token |
 | `PAGESPEED_API_KEY` | empty | Optional PageSpeed Insights API key |
+| `GOOGLE_OAUTH_CLIENT_ID` | empty | OAuth client for direct Google APIs |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | empty | OAuth client secret |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | empty | Refresh token authorized for Merchant API and Google Ads API scopes |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | empty | Required by direct Google Ads API routes |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | empty | Optional manager account ID for Google Ads API |
+| `GOOGLE_ADS_API_VERSION` | `v24` | Google Ads REST API version |
 
 When `GOOGLE_SEO_API_KEY` is set, send:
 
@@ -142,7 +148,7 @@ Reuse the same Google session by calling `POST /auth/login` with `{"service":"go
 | POST | `/google-ads/control` | Click a `label` or fill it with `text`; optional `submit` |
 | POST | `/google-ads/filter` | Same control operation, for visible filter fields |
 
-Reports: `overview`, `campaigns`, `ad-groups`, `ads`, `keywords`, `search-terms`, `landing-pages`, `assets`, `ad-assets`, `audiences`, `conversions`, `attribution`, `change-history`, `keyword-planner`, `data-manager`, `preferences`.
+Reports: `overview`, `campaigns`, `ad-groups`, `ads`, `keywords`, `search-terms`, `landing-pages`, `assets`, `ad-assets`, `asset-groups`, `audiences`, `conversions`, `conversion-goals`, `attribution`, `change-history`, `keyword-planner`, `data-manager`, `preferences`, `recommendations`, `budgets`, `devices`, `geographic`, `demographics`, `placements`, `negative-keywords`, `shopping-products`, `billing`, `campaign-diagnostics`.
 
 ```bash
 curl -X POST http://127.0.0.1:3100/auth/login -H "Content-Type: application/json" -d '{"service":"google-ads"}'
@@ -152,7 +158,39 @@ curl -X POST http://127.0.0.1:3100/google-ads/keyword-ideas -H "Content-Type: ap
 
 Reports contain visible tables, metrics, charts, controls and links. `allPages=true` follows pagination up to `maxPages` (default 50, maximum 500). `complete=false` means partial data; `null` means completeness could not be verified. CSV requires verified completeness unless `allowPartial=true` is supplied.
 
-Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. Controls can save changes and affect advertising spend. See [Google Ads endpoints](API.md#google-ads-web-session) for account selection, parameters and limitations. Shared login, keyword research, forecasts and CSV have been checked with a real Ads account. Unavailable reports that redirect elsewhere return HTTP 409.
+### Google Merchant Center
+
+Use `POST /auth/login` with `{"service":"merchant-center"}` to open the shared Google login. This integration reads and controls the authenticated Merchant Center web interface; it is not the official Merchant API.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/merchant-center/reports` | List named Merchant Center sections |
+| GET | `/merchant-center/state` | Read the current page, controls and account context |
+| GET | `/merchant-center/navigation` | Discover links in the signed-in Merchant Center account |
+| GET | `/merchant-center/report` | Read a named report or a Merchant Center `path` |
+| GET | `/merchant-center/{report}` | Shortcut for a named report; supports `.csv` |
+| POST | `/merchant-center/navigate` | Open a returned Merchant Center path or URL |
+| POST | `/merchant-center/control` | Click or fill a visible control by label |
+| POST | `/merchant-center/filter` | Alias for visible control operations |
+
+Sections: `overview`, `products`, `diagnostics`, `performance`, `marketing`, `campaigns`, `promotions`, `data-sources`, `shipping-returns`, `notifications`, `settings`. See [Merchant Center endpoints](API.md#google-merchant-center-web-session).
+
+Merchant Center and Ads controls operate real account screens. UI availability depends on permissions and Google's current layout. Review the state endpoint before calling controls; saves and campaign changes can affect products or advertising spend. For direct API access, configure OAuth using `.env.example`; Google Ads also requires a developer token.
+
+The optional direct REST endpoints support Merchant API resource methods and Google Ads GAQL searches and resource mutations:
+
+```text
+GET  /api/merchant/accounts/v1/accounts
+GET  /api/merchant/products/v1/accounts/{accountId}/products?pageSize=100
+POST /api/merchant/reports/v1/accounts/{accountId}/reports:search
+POST /api/google-ads/{customerId}/googleAds:search
+POST /api/google-ads/{customerId}/googleAds:searchStream
+POST /api/google-ads/{customerId}/campaigns:mutate
+```
+
+The OAuth refresh token must include `https://www.googleapis.com/auth/content` and `https://www.googleapis.com/auth/adwords`. Google Ads IDs use digits without hyphens. Manager accounts can be set with `GOOGLE_ADS_LOGIN_CUSTOMER_ID` or `loginCustomerId` on a request. Direct API mutations update the real Google account. See [API.md](API.md) for full parameters.
+
+Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. CSV export requires verified completeness unless `allowPartial=true`. Unavailable reports that redirect elsewhere return HTTP 409.
 
 ### PageSpeed Insights
 

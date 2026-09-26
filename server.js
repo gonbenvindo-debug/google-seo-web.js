@@ -2,7 +2,8 @@
 
 const { timingSafeEqual } = require('crypto');
 const http = require('http');
-const { Client, LocalAuth, Services, GoogleAdsReports } = require('./');
+const GoogleApiClient = require('./src/google-api');
+const { Services, GoogleAdsReports, MerchantCenterReports } = require('./src/Constants');
 
 const jsonRoutes = new Set([
     'POST /auth/login',
@@ -23,6 +24,9 @@ const jsonRoutes = new Set([
     'POST /google-ads/filter',
     'POST /google-ads/keyword-ideas',
     'POST /google-ads/keyword-forecast',
+    'POST /merchant-center/navigate',
+    'POST /merchant-center/control',
+    'POST /merchant-center/filter',
 ]);
 
 function hasValidKey(authorization, apiKey) {
@@ -83,7 +87,7 @@ function toCsv(report, tableIndex = 0) {
         .join('\r\n');
 }
 
-function createApiServer(client, { apiKey } = {}) {
+function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient() } = {}) {
     let starting;
     const start = async (target) => {
         if (starting) {
@@ -132,8 +136,10 @@ function createApiServer(client, { apiKey } = {}) {
             }
             const url = new URL(request.url, 'http://localhost');
             const route = `${request.method} ${url.pathname}`;
-            const body = jsonRoutes.has(route) ? await readJson(request) : {};
-            if (jsonRoutes.has(route) && (!body || typeof body !== 'object' || Array.isArray(body))) {
+            const directApi = /^\/api\/(?:merchant(?:\/|$)|google-ads(?:\/|$))/.test(url.pathname);
+            const needsBody = jsonRoutes.has(route) || (directApi && request.method !== 'GET');
+            const body = needsBody ? await readJson(request) : {};
+            if (needsBody && (!body || typeof body !== 'object' || Array.isArray(body))) {
                 throw new TypeError('JSON body must be an object');
             }
             const ensureSearchConsole = async () => {
@@ -174,12 +180,52 @@ function createApiServer(client, { apiKey } = {}) {
                 crawled: url.searchParams.has('crawled') ? booleanParam(url.searchParams, 'crawled') : undefined,
                 maxPages: integerParam(url.searchParams, 'maxPages', 500),
             });
+            const apiQuery = () => {
+                const query = {};
+                for (const key of new Set(url.searchParams.keys())) {
+                    const values = url.searchParams.getAll(key);
+                    query[key] = values.length > 1 ? values : values[0];
+                }
+                return query;
+            };
+
+            if (directApi && request.method !== 'OPTIONS') {
+                if (url.pathname === '/api/merchant' || url.pathname.startsWith('/api/merchant/')) {
+                    const path = url.pathname.slice('/api/merchant'.length).replace(/^\//, '');
+                    if (!path) throw new TypeError('Merchant API path is required after /api/merchant/');
+                    const result = await googleApiClient.requestMerchant({ path, method: request.method, query: apiQuery(), body: needsBody ? body : undefined });
+                    return sendJson(result.status, result.data);
+                }
+                if (url.pathname === '/api/google-ads/customers:listAccessibleCustomers') {
+                    const result = await googleApiClient.requestGoogleAds({
+                        path: 'customers:listAccessibleCustomers',
+                        method: request.method,
+                        query: apiQuery(),
+                    });
+                    return sendJson(result.status, result.data);
+                }
+                const adsApiPath = url.pathname.match(/^\/api\/google-ads\/(\d{6,20})(?:\/(.+)|(:[A-Za-z][A-Za-z0-9]*))$/);
+                if (!adsApiPath) throw new TypeError('Google Ads API route must include a customer ID and a search, customer action or resource action');
+                const query = apiQuery();
+                const loginCustomerId = query.loginCustomerId;
+                delete query.loginCustomerId;
+                const result = await googleApiClient.requestGoogleAds({
+                    customerId: adsApiPath[1],
+                    path: adsApiPath[2] || adsApiPath[3],
+                    method: request.method,
+                    query,
+                    body: needsBody ? body : undefined,
+                    loginCustomerId,
+                });
+                return sendJson(result.status, result.data);
+            }
 
             if (route === 'GET /health' || route === 'GET /auth/status') {
                 return sendJson(200, await client.getStatus());
             }
             if (route === 'GET /services') return sendJson(200, Services);
             if (route === 'GET /google-ads/reports') return sendJson(200, client.getGoogleAdsReports());
+            if (route === 'GET /merchant-center/reports') return sendJson(200, client.getMerchantCenterReports());
             if (route === 'POST /auth/login' || route === 'POST /browser/start') {
                 return sendJson(200, await start(body.target || body.service || 'search-console'));
             }
@@ -383,6 +429,43 @@ function createApiServer(client, { apiKey } = {}) {
                 }
                 return sendJson(report.complete === false ? 206 : 200, report);
             }
+            const merchantReport = url.pathname.match(/^\/merchant-center\/([^/]+?)(\.csv)?$/);
+            const isMerchantReport = request.method === 'GET' && merchantReport &&
+                (merchantReport[1] === 'report' || Object.hasOwn(MerchantCenterReports, merchantReport[1]));
+            if (isMerchantReport || [
+                'GET /merchant-center/state', 'GET /merchant-center/navigation',
+                'POST /merchant-center/navigate', 'POST /merchant-center/control', 'POST /merchant-center/filter',
+            ].includes(route)) {
+                const allPages = booleanParam(url.searchParams, 'allPages', Boolean(merchantReport?.[2]));
+                const maxPages = integerParam(url.searchParams, 'maxPages', 50);
+                if (maxPages < 1 || maxPages > 500) throw new TypeError('maxPages must be between 1 and 500');
+                const table = integerParam(url.searchParams, 'table', 0);
+                if (table < 0) throw new TypeError('table must not be negative');
+                if (route === 'POST /merchant-center/navigate' && typeof body.target !== 'string') {
+                    throw new TypeError('target is required and must be a Merchant Center path or URL');
+                }
+                if (starting) await starting;
+                if (!client.pupBrowser) await start('merchant-center');
+                if (route === 'GET /merchant-center/state') return sendJson(200, await client.getMerchantCenterState());
+                if (route === 'GET /merchant-center/navigation') return sendJson(200, await client.getMerchantCenterNavigation());
+                if (route === 'POST /merchant-center/navigate') return sendJson(200, await client.open(body.target));
+                if (route === 'POST /merchant-center/control' || route === 'POST /merchant-center/filter') {
+                    return sendJson(200, await client.controlMerchantCenter(body));
+                }
+                const report = await client.getMerchantCenterReport({
+                    report: merchantReport[1] === 'report' ? (url.searchParams.get('report') || 'overview') : merchantReport[1],
+                    path: url.searchParams.get('path') || undefined,
+                    allPages,
+                    maxPages,
+                });
+                if (merchantReport[2]) {
+                    if (report.complete !== true && !booleanParam(url.searchParams, 'allowPartial')) {
+                        return sendJson(409, { error: 'Cannot verify a complete export. Inspect the JSON report, or set allowPartial=true to export rendered rows.' });
+                    }
+                    return sendCsv(toCsv(report, table), `merchant-center-${merchantReport[1]}.csv`);
+                }
+                return sendJson(report.complete === false ? 206 : 200, report);
+            }
             if (route === 'GET /pagespeed/report' || route === 'GET /pagespeed/report.csv') {
                 const target = url.searchParams.get('url');
                 if (!target) throw new TypeError('url is required');
@@ -432,6 +515,8 @@ function createApiServer(client, { apiKey } = {}) {
 }
 
 async function main() {
+    const Client = require('./src/Client');
+    const LocalAuth = require('./src/authStrategies/LocalAuth');
     const port = Number(process.env.GOOGLE_SEO_API_PORT || 3100);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('GOOGLE_SEO_API_PORT must be an integer between 1 and 65535');

@@ -12,6 +12,7 @@ const {
     Events,
     GoogleAdsReports,
     LoginURL,
+    MerchantCenterReports,
     SearchConsoleReports,
     Services,
 } = require('./Constants');
@@ -47,14 +48,16 @@ class Client extends EventEmitter {
         this._pageQueue = Promise.resolve();
         this._searchConsoleResource = options.searchConsoleProperty || null;
         this._googleAdsContext = {};
+        this._merchantCenterContext = {};
     }
 
     async initialize(target = this.options.defaultService) {
         if (this.pupBrowser) throw new Error('Client is already initialized');
-        const service = this.resolveTarget(target).service === 'google-ads' ? 'google-ads' : 'search-console';
-        const loginUrl = service === 'google-ads'
-            ? `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(Services[service].url)}`
-            : LoginURL;
+        const requestedService = this.resolveTarget(target).service;
+        const service = ['google-ads', 'merchant-center'].includes(requestedService) ? requestedService : 'search-console';
+        const loginUrl = service === 'search-console'
+            ? LoginURL
+            : `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(Services[service].url)}`;
         this._destroying = false;
         try {
             await this.authStrategy.beforeBrowserInitialized();
@@ -288,6 +291,112 @@ class Client extends EventEmitter {
 
     getGoogleAdsReports() {
         return Object.entries(GoogleAdsReports).map(([name, path]) => ({ name, url: this._googleAdsUrl(path) }));
+    }
+
+    getMerchantCenterReports() {
+        return Object.entries(MerchantCenterReports).map(([name, path]) => ({ name, path }));
+    }
+
+    getMerchantCenterState() {
+        return this._runPageTask(async () => {
+            await this._requireMerchantCenter();
+            return { ...(await this.getState()), account: { ...this._merchantCenterContext } };
+        });
+    }
+
+    getMerchantCenterNavigation() {
+        return this._runPageTask(async () => {
+            await this._openMerchantCenter('');
+            const report = await this._collectMerchantCenterReport();
+            return {
+                url: report.url,
+                account: report.account,
+                links: report.links.filter(({ url }) => {
+                    try {
+                        const target = new URL(url);
+                        return target.protocol === 'https:' && target.hostname === 'merchants.google.com';
+                    } catch { return false; }
+                }),
+            };
+        });
+    }
+
+    getMerchantCenterReport({ report = 'overview', path, allPages = false, maxPages = 50 } = {}) {
+        return this._runPageTask(async () => {
+            if (typeof allPages !== 'boolean' || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
+                throw new TypeError('allPages must be boolean and maxPages must be an integer between 1 and 500');
+            }
+            if (path !== undefined) {
+                await this._openMerchantCenter(path);
+            } else {
+                if (!Object.hasOwn(MerchantCenterReports, report)) throw new TypeError(`Unknown Merchant Center report: ${report}`);
+                await this._openMerchantCenter(MerchantCenterReports[report]);
+            }
+            return this._collectMerchantCenterReport({ allPages, maxPages });
+        });
+    }
+
+    controlMerchantCenter({ label, text, submit = false, exact = true } = {}) {
+        return this._runPageTask(async () => {
+            if (typeof label !== 'string' || !label.trim() || (text !== undefined && typeof text !== 'string') ||
+                typeof submit !== 'boolean' || typeof exact !== 'boolean') {
+                throw new TypeError('label must be a non-empty string; text a string; submit and exact booleans');
+            }
+            await this._requireMerchantCenter();
+            const changed = text === undefined
+                ? await this._clickByLabel(label, { exact, unique: true })
+                : await this._typeByLabel(label, text, { submit, exact, unique: true });
+            if (!changed) throw Object.assign(new Error(`Merchant Center control not available: ${label}. Inspect /merchant-center/state for current labels or permissions.`), { status: 409 });
+            await this.pupPage.waitForNetworkIdle({ idleTime: 400, timeout: 3000 }).catch((error) => {
+                if (error.name !== 'TimeoutError') throw error;
+            });
+            await sleep(500);
+            return this._collectMerchantCenterReport();
+        });
+    }
+
+    async _openMerchantCenter(target) {
+        this._requirePage();
+        const url = this._merchantCenterUrl(target);
+        await this.pupPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await sleep(1000);
+        await this._requireMerchantCenter();
+        return this.getStatus();
+    }
+
+    _merchantCenterUrl(target = '') {
+        if (typeof target !== 'string') throw new TypeError('Merchant Center path must be a string');
+        const url = new URL(target, Services['merchant-center'].url);
+        if (url.protocol !== 'https:' || url.hostname !== 'merchants.google.com' || url.port || url.username || url.password) {
+            throw new TypeError('Merchant Center URL must use https://merchants.google.com/');
+        }
+        if (!['account', 'accountId', 'authuser'].some((name) => url.searchParams.has(name))) {
+            for (const [name, value] of Object.entries(this._merchantCenterContext)) url.searchParams.set(name, value);
+        }
+        return url.href;
+    }
+
+    async _requireMerchantCenter() {
+        this._requirePage();
+        if (!(await this._isServiceAuthenticated('merchant-center'))) {
+            throw Object.assign(new Error('Open Merchant Center with POST /auth/login {"service":"merchant-center"}; the current page is not an authenticated Merchant Center page'), { status: 409 });
+        }
+        await this.getStatus();
+    }
+
+    async _collectMerchantCenterReport(options = {}) {
+        await this._requireMerchantCenter();
+        const url = new URL(this.pupPage.url());
+        this._merchantCenterContext = Object.fromEntries(['account', 'accountId', 'authuser']
+            .filter((name) => url.searchParams.has(name))
+            .map((name) => [name, url.searchParams.get(name)]));
+        const report = await this._collectCurrentReport(options);
+        return {
+            ...report,
+            account: { ...this._merchantCenterContext },
+            source: 'merchant-center-web-ui',
+            extraction: 'Rendered rows only; virtualized rows, hidden columns and unavailable reports may be missing.',
+        };
     }
 
     getGoogleAdsAccounts() {
@@ -1650,6 +1759,12 @@ class Client extends EventEmitter {
     }
 
     async _isServiceAuthenticated(service) {
+        if (service === 'merchant-center') {
+            if (!this.pupPage || !(await this._isAuthenticated())) return false;
+            let url;
+            try { url = new URL(this.pupPage.url()); } catch { return false; }
+            return url.hostname === 'merchants.google.com';
+        }
         if (service !== 'google-ads') return this._isSearchConsoleAuthenticated();
         if (!this.pupPage || !(await this._isAuthenticated())) return false;
         const url = new URL(this.pupPage.url());

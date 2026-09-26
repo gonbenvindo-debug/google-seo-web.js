@@ -75,6 +75,32 @@ exports.GoogleAdsReports = Object.freeze({
     'keyword-planner': 'keywordplanner/home',
     'data-manager': 'datamanager',
     preferences: 'preferences',
+    recommendations: 'recommendations',
+    budgets: 'budgets',
+    devices: 'devices',
+    geographic: 'geographic',
+    demographics: 'demographics',
+    placements: 'content/placements',
+    'negative-keywords': 'keywords/negative',
+    'asset-groups': 'assetgroups',
+    'shopping-products': 'shopping/products',
+    'conversion-goals': 'conversions',
+    billing: 'billing/summary',
+    'campaign-diagnostics': 'overview/diagnostics',
+});
+
+exports.MerchantCenterReports = Object.freeze({
+    overview: '',
+    products: 'products',
+    diagnostics: 'products/diagnostics',
+    performance: 'analytics',
+    marketing: 'marketing',
+    campaigns: 'marketing/campaigns',
+    promotions: 'promotions',
+    'data-sources': 'data-sources',
+    'shipping-returns': 'shipping-and-returns',
+    notifications: 'notifications',
+    settings: 'settings',
 });
 
 exports.AllowedHosts = new Set([
