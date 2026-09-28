@@ -2,6 +2,7 @@
 
 const MERCHANT_API_HOST = 'https://merchantapi.googleapis.com';
 const GOOGLE_ADS_API_HOST = 'https://googleads.googleapis.com';
+const ADSENSE_API_HOST = 'https://adsense.googleapis.com';
 const DEFAULT_ADS_API_VERSION = 'v24';
 
 class GoogleApiClient {
@@ -17,6 +18,16 @@ class GoogleApiClient {
     async requestMerchant({ path, method = 'GET', query, body } = {}) {
         const apiPath = this._merchantPath(path);
         return this._request(`${MERCHANT_API_HOST}/${apiPath}`, {
+            method: this._method(method),
+            query,
+            body,
+            headers: { Authorization: `Bearer ${await this._getAccessToken()}` },
+        });
+    }
+
+    async requestAdSense({ path, method = 'GET', query, body } = {}) {
+        const apiPath = this._adsensePath(path);
+        return this._request(`${ADSENSE_API_HOST}/${apiPath}`, {
             method: this._method(method),
             query,
             body,
@@ -64,6 +75,17 @@ class GoogleApiClient {
         try { decoded = decodeURIComponent(normalized); } catch { throw new TypeError('path contains invalid URL encoding'); }
         if (decoded.split('/').includes('..') || !/^(?:accounts|products|reports|datasources|inventories|conversions|notifications|promotions|quota|ordertracking|productstudio)\/v\d+(?:alpha|beta)?(?:\/|$)/.test(decoded)) {
             throw new TypeError('path must target a supported Merchant API v1 resource');
+        }
+        return normalized;
+    }
+
+    _adsensePath(path) {
+        if (typeof path !== 'string' || !path.trim()) throw new TypeError('path is required');
+        const normalized = path.trim().replace(/^\/+/, '');
+        let decoded;
+        try { decoded = decodeURIComponent(normalized); } catch { throw new TypeError('path contains invalid URL encoding'); }
+        if (decoded.split('/').includes('..') || !/^v2\/accounts(?:\/|:|$)/.test(decoded)) {
+            throw new TypeError('path must target a supported AdSense Management API v2 account resource');
         }
         return normalized;
     }

@@ -6,7 +6,7 @@ Base local: `http://127.0.0.1:3100`. Se `GOOGLE_SEO_API_KEY` estiver definida, t
 
 ## REST APIs Google (OAuth opcional)
 
-Estas rotas chamam diretamente as APIs oficiais e funcionam independentemente da sessão de Chromium. Configure `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` e `GOOGLE_OAUTH_REFRESH_TOKEN`; o refresh token deve ter as permissões `https://www.googleapis.com/auth/content` e `https://www.googleapis.com/auth/adwords`. O `.env` é ignorado pelo Git; use `.env.example` como modelo. Também é possível definir temporariamente `GOOGLE_ACCESS_TOKEN` para testes locais.
+Estas rotas chamam diretamente as APIs oficiais e funcionam independentemente da sessão de Chromium. Configure `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` e `GOOGLE_OAUTH_REFRESH_TOKEN`; o refresh token precisa dos scopes correspondentes às APIs usadas: `https://www.googleapis.com/auth/content`, `https://www.googleapis.com/auth/adwords` e/ou `https://www.googleapis.com/auth/adsense.readonly` (leitura) ou `https://www.googleapis.com/auth/adsense` (escrita). O `.env` é ignorado pelo Git; use `.env.example` como modelo. Também é possível definir temporariamente `GOOGLE_ACCESS_TOKEN` para testes locais.
 
 ### Merchant API
 
@@ -64,6 +64,39 @@ POST /api/google-ads/{customerId}:generateKeywordIdeas
 `search` and `searchStream` accept the Google Ads REST request JSON; resource actions and supported customer-level actions are passed through to their corresponding official methods. This covers the generic mutate method for supported resources plus special operations such as conversion uploads and offline user data jobs. Google Ads actions can change campaigns, bids and spend. The server validates the customer ID and method path; errors retain Google's HTTP status and response payload. Direct API credentials are not supplied with this project.
 
 Official references: [Merchant API REST resources](https://developers.google.com/merchant/api/reference/rest), [Google Ads API REST overview](https://developers.google.com/google-ads/api/rest/overview), [Google Ads API OAuth](https://developers.google.com/google-ads/api/docs/oauth/overview).
+
+### AdSense e H5 Games
+
+O proxy encaminha métodos REST da AdSense Management API v2 para `adsense.googleapis.com`. Use apenas recursos `v2/accounts...`; query strings e corpos JSON seguem a API oficial:
+
+```http
+GET /api/adsense/v2/accounts
+GET /api/adsense/v2/accounts/pub-1234567890123456
+GET /api/adsense/v2/accounts/pub-1234567890123456/adclients
+GET /api/adsense/v2/accounts/pub-1234567890123456/adclients/ca-pub-1234567890123456/adunits
+GET /api/adsense/v2/accounts/pub-1234567890123456/sites
+GET /api/adsense/v2/accounts/pub-1234567890123456/reports:generate?dateRange=LAST_7_DAYS&dimensions=DATE&dimensions=AD_FORMAT_NAME&metrics=ESTIMATED_EARNINGS
+GET /api/adsense/v2/accounts/pub-1234567890123456/alerts
+GET /api/adsense/v2/accounts/pub-1234567890123456/payments
+```
+
+Também são encaminhados os recursos oficiais de unidades de anúncio, canais personalizados, canais de URL, sites, problemas de política, relatórios guardados e recuperação de bloqueio de anúncios. A API valida que os caminhos pertencem a `v2/accounts`; autenticação, recursos disponíveis e métodos continuam sujeitos às permissões do AdSense. `POST`, `PATCH` e `DELETE` exigem corpo JSON.
+
+H5 Games usa o mesmo código AdSense, com a inicialização da Ad Placement API. Coloque isto no `<head>` da página que contém o canvas/jogo e substitua o publisher ID. A API deve estar no mesmo documento do jogo:
+
+```html
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-1234567890123456" crossorigin="anonymous"></script>
+<script>
+  window.adsbygoogle = window.adsbygoogle || [];
+  var adBreak = adConfig = function (options) { adsbygoogle.push(options); };
+</script>
+```
+
+No jogo, chame `adBreak({type: 'interstitial', name: 'between-levels', beforeAd: pauseGame, afterAd: resumeGame})` em transições naturais. Para recompensas, use `type: 'reward'`, apresente uma opção explícita ao jogador em `beforeReward(showAdFn)`, e conceda a recompensa em `adViewed`; feche a oferta sem recompensa em `adDismissed`. `adBreakDone` informa quando a tentativa terminou mesmo sem anúncio servido. Não invoque anúncios em cada interação ou durante jogo contínuo. A página H5 Games Ads da Google requer candidatura/aprovação; para jogos em WebView de aplicação, use os slots AdMob indicados pela Google.
+
+Para analisar formatos H5, use `AD_FORMAT_NAME` como dimensão em `reports:generate` e consulte `Interstitial` e `Rewarded`; a API de relatórios também expõe ganhos e outras métricas. O report de H5 pode incluir cliques de interação/visualização rewarded, por isso métricas derivadas de cliques podem induzir em erro.
+
+Referências oficiais: [AdSense Management API v2](https://developers.google.com/adsense/management/reference/rest), [H5 Games Ads: integração](https://support.google.com/adsense/answer/9955214), [Ad Placement API](https://developers.google.com/ad-placement/apis), [estrutura de jogos H5](https://developers.google.com/ad-placement/docs/html5-game-structure), [relatórios H5 Games](https://support.google.com/adsense/answer/13292016).
 
 ## Sessão e controlo de baixo nível
 

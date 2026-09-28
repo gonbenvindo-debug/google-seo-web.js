@@ -43,7 +43,7 @@ curl http://127.0.0.1:3100/browser/state
 | `PAGESPEED_API_KEY` | empty | Optional PageSpeed Insights API key |
 | `GOOGLE_OAUTH_CLIENT_ID` | empty | OAuth client for direct Google APIs |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | empty | OAuth client secret |
-| `GOOGLE_OAUTH_REFRESH_TOKEN` | empty | Refresh token authorized for Merchant API and Google Ads API scopes |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | empty | Refresh token authorized for the Google APIs you use (Merchant, Ads and/or AdSense) |
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | empty | Required by direct Google Ads API routes |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | empty | Optional manager account ID for Google Ads API |
 | `GOOGLE_ADS_API_VERSION` | `v24` | Google Ads REST API version |
@@ -188,7 +188,9 @@ POST /api/google-ads/{customerId}/googleAds:searchStream
 POST /api/google-ads/{customerId}/campaigns:mutate
 ```
 
-The OAuth refresh token must include `https://www.googleapis.com/auth/content` and `https://www.googleapis.com/auth/adwords`. Google Ads IDs use digits without hyphens. Manager accounts can be set with `GOOGLE_ADS_LOGIN_CUSTOMER_ID` or `loginCustomerId` on a request. Direct API mutations update the real Google account. See [API.md](API.md) for full parameters.
+For Merchant Center and Google Ads, the OAuth refresh token must include `https://www.googleapis.com/auth/content` and `https://www.googleapis.com/auth/adwords`, respectively. Google Ads IDs use digits without hyphens. Manager accounts can be set with `GOOGLE_ADS_LOGIN_CUSTOMER_ID` or `loginCustomerId` on a request. Direct API mutations update the real Google account. See [API.md](API.md) for full parameters.
+
+AdSense publishers can use the AdSense Management API v2 at `/api/adsense/` with the `https://www.googleapis.com/auth/adsense.readonly` scope for reads or `https://www.googleapis.com/auth/adsense` for writes. The H5 Games Ad Placement API runs in the game page and uses `adBreak()` and `adConfig()`; see [API.md](API.md#adsense-e-h5-games).
 
 Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. CSV export requires verified completeness unless `allowPartial=true`. Unavailable reports that redirect elsewhere return HTTP 409.
 

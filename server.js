@@ -136,7 +136,7 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
             }
             const url = new URL(request.url, 'http://localhost');
             const route = `${request.method} ${url.pathname}`;
-            const directApi = /^\/api\/(?:merchant(?:\/|$)|google-ads(?:\/|$))/.test(url.pathname);
+            const directApi = /^\/api\/(?:merchant(?:\/|$)|google-ads(?:\/|$)|adsense(?:\/|$))/.test(url.pathname);
             const needsBody = jsonRoutes.has(route) || (directApi && request.method !== 'GET');
             const body = needsBody ? await readJson(request) : {};
             if (needsBody && (!body || typeof body !== 'object' || Array.isArray(body))) {
@@ -194,6 +194,12 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                     const path = url.pathname.slice('/api/merchant'.length).replace(/^\//, '');
                     if (!path) throw new TypeError('Merchant API path is required after /api/merchant/');
                     const result = await googleApiClient.requestMerchant({ path, method: request.method, query: apiQuery(), body: needsBody ? body : undefined });
+                    return sendJson(result.status, result.data);
+                }
+                if (url.pathname === '/api/adsense' || url.pathname.startsWith('/api/adsense/')) {
+                    const path = url.pathname.slice('/api/adsense'.length).replace(/^\//, '');
+                    if (!path) throw new TypeError('AdSense API path is required after /api/adsense/');
+                    const result = await googleApiClient.requestAdSense({ path, method: request.method, query: apiQuery(), body: needsBody ? body : undefined });
                     return sendJson(result.status, result.data);
                 }
                 if (url.pathname === '/api/google-ads/customers:listAccessibleCustomers') {
