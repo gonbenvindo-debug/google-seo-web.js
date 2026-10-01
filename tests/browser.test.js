@@ -49,6 +49,13 @@ test('HTTP routes share startup, validate input and protect incomplete exports',
         return { service, complete: options.report === 'campaigns' ? false : null,
             tables: [{ headers: ['Name'], rows: [['a,"b"']] }] };
     };
+    client.getMerchantCenterCatalog = async (options) => {
+        calls.push({ service: 'merchant-center-catalog', options });
+        return { complete: false, products: [{ 'Product ID': 'sku-1', Title: 'Flag' }], tables: [{ headers: ['Product ID', 'Title'], rows: [] }] };
+    };
+    client.openMerchantCenterProduct = async (options) => ({ opened: options.offerId });
+    client.prepareMerchantCenterForm = async (options) => ({ confirmationId: 'draft', changes: options });
+    client.applyMerchantCenterForm = async (options) => ({ submitted: true, confirmationId: options.confirmationId });
     client.getServiceState = async (service, options) => ({ service, ...options });
     client.navigate = async (service, target) => ({ service, target });
     client.getPageSpeedReport = async () => ({ strategy: 'mobile', audits: [{ id: 'audit', title: 'Audit' }] });
@@ -74,6 +81,23 @@ test('HTTP routes share startup, validate input and protect incomplete exports',
     assert.equal(starts, 1);
     assert.deepEqual(calls.slice(0, 2).map(({ service }) => service).sort(), ['analytics', 'merchant-center']);
     assert.equal((await request('/google-ads/campaigns')).status, 206);
+    const catalog = await request('/merchant-center/catalog?status=limited&query=Flag&maxPages=4');
+    assert.equal(catalog.status, 206);
+    assert.deepEqual(calls.at(-1).options, { status: 'limited', query: 'Flag', maxPages: 4 });
+    assert.equal((await request('/merchant-center/catalog.csv')).status, 409);
+    assert.equal((await request('/merchant-center/catalog.csv?allowPartial=true')).status, 200);
+    assert.match(await (await request('/merchant-center/catalog.csv?allowPartial=true')).text(), /Product ID,Title/);
+    assert.equal((await request('/merchant-center/account-issues')).status, 200);
+    assert.equal((await request('/merchant-center/product/edit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ offerId: 'sku-1', language: 'pt' }),
+    })).status, 200);
+    const preview = await request('/merchant-center/forms/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target: 'directoffers/create', fields: { Title: 'Flag' } }),
+    });
+    assert.equal((await preview.json()).confirmationId, 'draft');
+    assert.equal((await request('/merchant-center/forms/apply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmationId: 'draft' }),
+    })).status, 200);
     assert.equal((await request('/adsense/overview.csv')).status, 409);
     const csv = await request('/adsense/overview.csv?allowPartial=true');
     assert.equal(csv.status, 200);
@@ -136,4 +160,35 @@ test('Puppeteer extracts rendered tables and controls, rejects ambiguous actions
     assert.equal((await client.getState()).elements.find(({ label }) => label === 'Filter').value, 'reused');
     const [, nextState] = await Promise.all([client.navigate('trends', ''), client.getState()]);
     assert.equal(nextState.headings[0], 'Stats');
+});
+
+test('Merchant Center form changes remain drafts until explicit confirmation and are revalidated', async (t) => {
+    const client = new Client();
+    await client._launchBrowser({ headless: true });
+    t.after(() => client.destroy());
+    client._requireService = async () => {};
+    const html = '<h1>Product details</h1><label>Title<input></label>' +
+        '<button id="condition">Condition</button><div id="options" style="display:none">' +
+        '<div role="option" onclick="document.querySelector(\'#condition\').textContent=\'Condition New\';this.parentElement.style.display=\'none\'">New</div></div>' +
+        '<script>document.querySelector(\'#condition\').onclick=()=>document.querySelector(\'#options\').style.display=\'block\'</script>' +
+        '<button id="save" onclick="window.saved=(window.saved||0)+1">Save</button>';
+    await client.pupPage.setRequestInterception(true);
+    client.pupPage.on('request', (request) => request.respond({ status: 200, contentType: 'text/html', body: html }));
+
+    const preview = await client.prepareMerchantCenterForm({
+        target: 'directoffers/create', fields: { Title: 'Demo item' }, choices: { Condition: 'New' },
+    });
+    assert.equal(preview.canApply, true);
+    assert.equal(await client.pupPage.evaluate(() => window.saved || 0), 0);
+    assert.equal((await client.applyMerchantCenterForm({ confirmationId: preview.confirmationId })).submitted, true);
+    assert.equal(await client.pupPage.evaluate(() => window.saved), 1);
+    await assert.rejects(client.applyMerchantCenterForm({ confirmationId: preview.confirmationId }), /missing or expired/);
+
+    const next = await client.prepareMerchantCenterForm({ target: 'directoffers/create', fields: { Title: 'Second item' } });
+    await client.pupPage.evaluate(() => {
+        const input = document.querySelector('input');
+        input.value = 'Changed after preview';
+    });
+    await assert.rejects(client.applyMerchantCenterForm({ confirmationId: next.confirmationId }), /Form changed after preview/);
+    assert.equal(await client.pupPage.evaluate(() => window.saved), 1);
 });

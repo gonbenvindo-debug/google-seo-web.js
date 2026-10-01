@@ -56,6 +56,8 @@ linhas como o total do paginador. `false` significa extração incompleta e devo
 HTTP 206. `null` significa que a interface não forneceu evidência suficiente.
 CSV exige `true` ou `allowPartial=true`; caso contrário responde HTTP 409.
 Linhas virtualizadas, colunas escondidas e dados indisponíveis não são inferidos.
+O endpoint dedicado `/merchant-center/catalog` também percorre as linhas
+virtualizadas do catálogo antes de avaliar a sua completude.
 
 ### Controlos
 
@@ -95,6 +97,79 @@ serviço. Leia um estado novo depois de navegar: os IDs são temporários.
 As URLs são limitadas aos hosts do catálogo; `navigate` e `report?path=` são
 também limitados ao serviço indicado. URLs com credenciais ou portas adicionais
 são rejeitadas. Login, 2FA, captchas e consentimentos são concluídos manualmente.
+
+## Merchant Center — produtos, problemas e políticas
+
+| Método | Rota | Conteúdo |
+|---|---|---|
+| GET | `/merchant-center/catalog` | Catálogo estruturado, incluindo linhas virtualizadas |
+| GET | `/merchant-center/catalog.csv` | Exportação; exige extração completa, salvo `allowPartial=true` |
+| GET | `/merchant-center/diagnostics` ou `/product-issues` | Diagnóstico de produtos |
+| GET | `/merchant-center/account-issues` | Problemas e configuração da conta |
+| GET | `/merchant-center/policies` ou `/shipping-returns` | Políticas de envio e devolução |
+| GET | `/merchant-center/business-info`, `/business-address` | Informação da loja e morada comercial |
+| GET | `/merchant-center/product-performance`, `/pricing`, `/online-store`, `/store-quality` | Desempenho, preços, loja online e qualidade |
+
+O catálogo aceita `status=all`, `attention`, `approved`, `limited`,
+`not-approved` ou `under-review`, um filtro textual `query` e `maxPages` (1–500).
+`complete=false` e HTTP 206 indicam que a interface não permitiu verificar todas
+as linhas. A exportação CSV recusa esse resultado por padrão.
+
+```text
+GET /merchant-center/catalog?status=limited&query=SKU
+GET /merchant-center/catalog?status=attention
+GET /merchant-center/account-issues
+```
+
+Os relatórios incluem os links de edição que a Google apresenta. Para abrir um
+item, envia o `offerId` e, se necessário, o idioma do link:
+
+```json
+POST /merchant-center/product/edit
+{"offerId":"ID exato do produto","language":"pt"}
+```
+
+A criação manual e a edição usam o formulário renderizado pela Google. `fields`
+associa rótulos visíveis aos valores e `choices` seleciona opções dos menus:
+
+```json
+POST /merchant-center/forms/preview
+{
+  "target":"directoffers/create",
+  "fields":{
+    "Product page on your online store":"https://example.com/product",
+    "Title":"Example product",
+    "Brand":"Example brand",
+    "ID or SKU":"sku-123",
+    "Price":"12.99"
+  },
+  "choices":{"Condition":"New","Availability":"In stock","Currency":"EUR"}
+}
+```
+
+A resposta inclui o estado, `canApply`, as alterações e um `confirmationId`
+temporário. Se `canApply=false`, a Google ainda desativa a gravação: lê o estado,
+preenche os campos obrigatórios em falta e cria uma nova pré-visualização. Esta
+chamada não submete o formulário.
+
+Para editar um produto, abre-o com `/product/edit` e usa como `target` o URL de
+edição devolvido. Para corrigir a morada da loja ou criar políticas, consulta o
+relatório correspondente, usa `/merchant-center/control` para abrir o formulário
+(por exemplo, `Add shipping policy`) e faz o preview com o mesmo caminho. O
+preview mantém o formulário modal aberto se continuares na mesma página.
+
+Só a chamada seguinte submete o formulário. O ID expira após 15 minutos, funciona
+uma vez, exige que a página não tenha mudado e verifica de novo campos, opções e
+botão `Save` antes de clicar:
+
+```json
+POST /merchant-center/forms/apply
+{"confirmationId":"ID devolvido pelo preview"}
+```
+
+Este fluxo cobre as ações disponíveis na interface para a conta. A Google
+continua a validar os campos, a elegibilidade, os programas e as permissões; um
+formulário guardado não significa que o produto foi aprovado.
 
 ## Search Console — operações específicas
 

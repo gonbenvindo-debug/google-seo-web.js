@@ -54,6 +54,11 @@ fila de operações para evitar que uma leitura ou ação aconteça na app errad
 Os endpoints específicos do Search Console e do Keyword Planner continuam
 disponíveis. Consulta [API.md](API.md) para os parâmetros e exemplos.
 
+O Merchant Center tem também catálogo estruturado e CSV, diagnósticos, problemas
+da conta, políticas, páginas de preços/qualidade e edição de produtos. A criação
+e alteração de produtos ou políticas usa um passo de pré-visualização e outro de
+confirmação explícita; consulta [API.md](API.md#merchant-center--produtos-problemas-e-políticas).
+
 ## Adicionar serviços e endpoints
 
 O catálogo está em [src/Constants.js](src/Constants.js). Uma entrada com `name` e

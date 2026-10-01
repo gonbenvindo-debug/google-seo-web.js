@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawn } = require('child_process');
+const { randomUUID } = require('crypto');
 const { EventEmitter, once } = require('events');
 const fs = require('fs');
 const net = require('net');
@@ -47,6 +48,7 @@ class Client extends EventEmitter {
         this._pageQueue = Promise.resolve();
         this._searchConsoleResource = options.searchConsoleProperty || null;
         this._contexts = {};
+        this._merchantFormPreviews = new Map();
     }
 
     async initialize(target = this.options.defaultService) {
@@ -257,6 +259,130 @@ class Client extends EventEmitter {
     getMerchantCenterReport(options) { return this.getReport('merchant-center', options); }
     controlGoogleAds(options) { return this.control('google-ads', options); }
     controlMerchantCenter(options) { return this.control('merchant-center', options); }
+
+    getMerchantCenterCatalog({ status = 'all', query, maxPages = 50 } = {}) {
+        const statuses = { all: null, attention: null, approved: 'approved', limited: 'limited',
+            'not-approved': 'not approved', 'under-review': 'under review' };
+        if (!Object.hasOwn(statuses, status)) throw new TypeError('status must be all, attention, approved, limited, not-approved or under-review');
+        if (query !== undefined && (typeof query !== 'string' || query.length > 500)) throw new TypeError('query must be a string of at most 500 characters');
+        return this.getReport('merchant-center', {
+            report: 'products', tab: status === 'attention' ? 'Needs attention' : undefined,
+            allPages: true, maxPages,
+        }).then((report) => {
+            const table = report.tables.find(({ headers }) => headers.includes('Product ID'));
+            const products = (table?.rows || []).map((row) => Object.fromEntries(table.headers.map((header, index) => [header || 'Visibility', row[index] || ''])));
+            const filtered = products.filter((product) => (!statuses[status] || product.Status?.toLowerCase() === statuses[status]) &&
+                (!query || Object.values(product).some((value) => String(value).toLowerCase().includes(query.toLowerCase()))));
+            const total = report.paginations.filter(({ total }) => total >= products.length)
+                .sort((left, right) => left.total - right.total)[0]?.total;
+            return {
+                ...report, products: filtered, productCount: filtered.length,
+                complete: status === 'attention' && /Products that need your attention will appear here/i.test(report.rawText)
+                    ? true : Number.isInteger(total) ? products.length === total : null,
+            };
+        });
+    }
+
+    async openMerchantCenterProduct({ offerId, language, maxPages = 50 } = {}) {
+        if (typeof offerId !== 'string' || !offerId.trim() || offerId.length > 200) throw new TypeError('offerId is required and must be at most 200 characters');
+        if (language !== undefined && !/^[a-z]{2}$/i.test(language)) throw new TypeError('language must be a 2-letter code');
+        const report = await this.getReport('merchant-center', { report: 'products', allPages: true, maxPages });
+        const matches = report.links.filter(({ label, url }) => {
+            const target = new URL(url);
+            return label.startsWith('Edit product:') && target.pathname === '/mc/directoffers/edit' &&
+                target.searchParams.get('offerId') === offerId && (!language || target.searchParams.get('language') === language);
+        });
+        if (!matches.length) throw Object.assign(new Error('Product is not present in the rendered catalog; use its exact product ID and check catalog completeness.'), { status: 404 });
+        if (matches.length > 1) throw Object.assign(new Error('Several products match this ID; pass language to choose one.'), { status: 409 });
+        return this.navigate('merchant-center', matches[0].url);
+    }
+
+    prepareMerchantCenterForm({ target, fields = {}, choices = {} } = {}) {
+        if (typeof target !== 'string' || !target.trim() || !fields || Array.isArray(fields) || typeof fields !== 'object' ||
+            !choices || Array.isArray(choices) || typeof choices !== 'object' ||
+            (!Object.keys(fields).length && !Object.keys(choices).length) || Object.keys(fields).length > 100 || Object.keys(choices).length > 50) {
+            throw new TypeError('target and non-empty fields or choices objects are required');
+        }
+        if (Object.entries(fields).some(([label, value]) => !label.trim() || label.length > 200 || typeof value !== 'string' || value.length > 10000)) {
+            throw new TypeError('fields must map non-empty labels to strings of at most 10000 characters');
+        }
+        if (Object.entries(choices).some(([label, value]) => !label.trim() || label.length > 200 || typeof value !== 'string' || !value.trim() || value.length > 200)) {
+            throw new TypeError('choices must map non-empty labels to non-empty option names of at most 200 characters');
+        }
+        return this._runPageTask(async () => {
+            const requested = new URL(this._serviceUrl('merchant-center', target));
+            const current = new URL(this.pupPage.url());
+            if (current.origin !== requested.origin || current.pathname !== requested.pathname ||
+                [...requested.searchParams].some(([name, value]) => current.searchParams.get(name) !== value)) {
+                await this._openService('merchant-center', target);
+            }
+            for (const [label, value] of Object.entries(fields)) {
+                if (!(await this._typeByLabel(label, value, { exact: true, unique: true }))) {
+                    throw Object.assign(new Error('Form field not found: ' + label), { status: 409 });
+                }
+            }
+            for (const [label, option] of Object.entries(choices)) {
+                if (!(await this._clickByLabel(label, { exact: false, unique: true, selector: 'button, [role="button"], [role="combobox"]' })) ||
+                    !(await this._clickByLabel(option, { exact: true, unique: true, selector: '[role="option"], [role="menuitem"]' }))) {
+                    throw Object.assign(new Error('Form option not found: ' + label + ' → ' + option), { status: 409 });
+                }
+            }
+            const report = await this._collectCurrentReport();
+            const state = await this._getState({ maxText: 10000, maxElements: 1000 });
+            const currentFields = Object.fromEntries(Object.entries(fields).map(([label]) => {
+                const matches = state.elements.filter((element) => element.label === label && ['input', 'textarea', 'select'].includes(element.tag));
+                if (matches.length !== 1) throw Object.assign(new Error('Form field is missing or ambiguous: ' + label), { status: 409 });
+                return [label, matches[0].value];
+            }));
+            for (const [label, value] of Object.entries(fields)) {
+                if (currentFields[label] !== value) throw Object.assign(new Error('Form field could not be verified: ' + label), { status: 409 });
+            }
+            const save = state.elements.filter(({ label, role, tag }) => (role === 'button' || tag === 'button') && label.trim().toLowerCase() === 'save');
+            if (save.length !== 1) throw Object.assign(new Error('Save button is missing or ambiguous; inspect the current form state.'), { status: 409 });
+            const now = Date.now();
+            for (const [id, preview] of this._merchantFormPreviews) if (preview.expiresAt <= now) this._merchantFormPreviews.delete(id);
+            while (this._merchantFormPreviews.size >= 20) this._merchantFormPreviews.delete(this._merchantFormPreviews.keys().next().value);
+            const confirmationId = randomUUID();
+            const expiresAt = now + 15 * 60_000;
+            this._merchantFormPreviews.set(confirmationId, {
+                url: this.pupPage.url(), fields: currentFields, choices, expiresAt,
+            });
+            return {
+                confirmationId, expiresAt: new Date(expiresAt).toISOString(), canApply: !save.disabled,
+                service: 'merchant-center', target: this.pupPage.url(), changes: { fields, choices }, report,
+            };
+        });
+    }
+
+    applyMerchantCenterForm({ confirmationId } = {}) {
+        if (typeof confirmationId !== 'string' || !/^[\da-f-]{36}$/i.test(confirmationId)) throw new TypeError('confirmationId must be a valid draft ID');
+        return this._runPageTask(async () => {
+            const preview = this._merchantFormPreviews.get(confirmationId);
+            if (!preview || preview.expiresAt <= Date.now()) {
+                this._merchantFormPreviews.delete(confirmationId);
+                throw Object.assign(new Error('Form preview is missing or expired; preview the changes again.'), { status: 409 });
+            }
+            if (this._serviceForUrl(this.pupPage.url()) !== 'merchant-center' || this.pupPage.url() !== preview.url) {
+                throw Object.assign(new Error('Merchant Center page changed after preview; preview the form again.'), { status: 409 });
+            }
+            const state = await this._getState({ maxText: 10000, maxElements: 1000 });
+            for (const [label, expected] of Object.entries(preview.fields)) {
+                const matches = state.elements.filter((element) => element.label === label && ['input', 'textarea', 'select'].includes(element.tag));
+                if (matches.length !== 1 || matches[0].value !== expected) throw Object.assign(new Error('Form changed after preview; preview it again before saving.'), { status: 409 });
+            }
+            for (const [label, option] of Object.entries(preview.choices)) {
+                if (!state.elements.some(({ label: actual, role, tag }) => (role === 'button' || tag === 'button' || role === 'combobox') && actual.toLowerCase().startsWith(label.toLowerCase()) && actual.toLowerCase().includes(option.toLowerCase()))) {
+                    throw Object.assign(new Error('Selected option changed after preview; preview the form again.'), { status: 409 });
+                }
+            }
+            const save = state.elements.filter(({ label, role, tag }) => (role === 'button' || tag === 'button') && label.trim().toLowerCase() === 'save');
+            if (save.length !== 1 || save[0].disabled) throw Object.assign(new Error('Google has disabled Save; complete the required fields before applying.'), { status: 409 });
+            this._merchantFormPreviews.delete(confirmationId);
+            await this._clickByLabel('Save', { unique: true, selector: 'button, [role="button"]' });
+            await this._waitForPage();
+            return { submitted: true, report: await this._collectCurrentReport() };
+        });
+    }
 
     getGoogleAdsAccounts() {
         return this._runPageTask(async () => {
@@ -1099,6 +1225,24 @@ class Client extends EventEmitter {
         const report = await this._extractReport();
         const fromFirstPage = report.pagination?.from === 1;
         let pagesRead = 1;
+        const mergePage = (page) => {
+            page.tables.forEach((table, index) => {
+                if (!report.tables[index]) return report.tables.push(table);
+                const existing = new Set(report.tables[index].rows.map((row) => JSON.stringify(row)));
+                table.rows.forEach((row) => {
+                    const key = JSON.stringify(row);
+                    if (existing.has(key)) return;
+                    existing.add(key);
+                    report.tables[index].rows.push(row);
+                });
+            });
+            const links = new Set(report.links.map(({ url }) => url));
+            report.links.push(...page.links.filter(({ url }) => !links.has(url) && links.add(url)));
+        };
+        let virtualizedRowsRead = 0;
+        if (service === 'merchant-center' && report.tables.some(({ headers }) => headers.includes('Product ID'))) {
+            virtualizedRowsRead = await this._collectVirtualizedMerchantRows(report, maxPages, mergePage);
+        }
         let signature = JSON.stringify([report.tables, report.paginations]);
         const nextPage = async () => {
             for (let attempt = 0; attempt < 5; attempt++) {
@@ -1119,26 +1263,76 @@ class Client extends EventEmitter {
             const nextSignature = JSON.stringify([page.tables, page.paginations]);
             if (nextSignature === signature) break;
             signature = nextSignature;
-            page.tables.forEach((table, index) => {
-                if (!report.tables[index]) return report.tables.push(table);
-                const existing = new Set(report.tables[index].rows.map((row) => JSON.stringify(row)));
-                table.rows.forEach((row) => {
-                    const key = JSON.stringify(row);
-                    if (existing.has(key)) return;
-                    existing.add(key);
-                    report.tables[index].rows.push(row);
-                });
-            });
+            mergePage(page);
             report.pagination = page.pagination;
             report.paginations = page.paginations;
             pagesRead++;
         }
         report.pagesRead = pagesRead;
+        if (virtualizedRowsRead) report.virtualizedRowsRead = virtualizedRowsRead;
         report.complete = report.paginations.some(({ to, total }) => to < total) ? false
             : fromFirstPage && report.tables.length === 1 && report.paginations.length === 1
                 ? report.tables[0].rows.length === report.paginations[0].total : null;
-        report.extraction = 'Rendered rows only; hidden or virtualized rows may be missing. null completeness means the UI supplied insufficient evidence.';
+        report.extraction = virtualizedRowsRead
+            ? 'Merchant Center product rows were collected by scrolling the catalog; rows or columns not exposed by the Google interface remain unknown.'
+            : 'Rendered rows only; hidden or virtualized rows may be missing. null completeness means the UI supplied insufficient evidence.';
         return report;
+    }
+
+    async _collectVirtualizedMerchantRows(report, maxPages, mergePage) {
+        const tableIndex = report.tables.findIndex(({ headers }) => headers.includes('Product ID'));
+        const expected = report.paginations.map(({ total }) => total).filter((total) => total > 0).sort((left, right) => right - left)[0];
+        const scroll = await this.pupPage.evaluate(() => {
+            const visible = (element) => {
+                const rect = element.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            const root = [...document.querySelectorAll('table, [role="table"], [role="grid"], material-table')]
+                .find((element) => visible(element) && element.innerText.includes('Product ID'));
+            if (!root) return null;
+            const row = [...root.querySelectorAll('tr, [role="row"], material-row, .particle-table-row')]
+                .find((element) => visible(element) && element.innerText.includes('Product ID')) || root;
+            for (let element = row.parentElement; element; element = element.parentElement) {
+                const style = getComputedStyle(element);
+                if (/(auto|scroll)/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 30) {
+                    element.dataset.gtmMerchantScroll = 'true';
+                    return { top: element.scrollTop };
+                }
+            }
+            return null;
+        });
+        if (!scroll) return 0;
+        let collected = report.tables[tableIndex].rows.length;
+        let previousCount = collected;
+        let stagnantAtBottom = 0;
+        try {
+            for (let step = 0; step < maxPages && (!expected || collected < expected); step++) {
+                const position = await this.pupPage.evaluate(() => {
+                    const element = document.querySelector('[data-gtm-merchant-scroll="true"]');
+                    if (!element) return null;
+                    element.scrollTop = Math.min(element.scrollTop + Math.max(200, Math.floor(element.clientHeight * 0.75)), element.scrollHeight);
+                    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    return { top: element.scrollTop, max: element.scrollHeight - element.clientHeight };
+                });
+                if (!position) break;
+                await sleep(800);
+                const page = await this._extractReport();
+                mergePage(page);
+                collected = report.tables[tableIndex].rows.length;
+                stagnantAtBottom = collected === previousCount && position.top >= position.max - 2 ? stagnantAtBottom + 1 : 0;
+                if (stagnantAtBottom >= 2) break;
+                previousCount = collected;
+            }
+        } finally {
+            await this.pupPage.evaluate((top) => {
+                const element = document.querySelector('[data-gtm-merchant-scroll="true"]');
+                if (!element) return;
+                element.scrollTop = top;
+                element.dispatchEvent(new Event('scroll', { bubbles: true }));
+                delete element.dataset.gtmMerchantScroll;
+            }, scroll.top);
+        }
+        return collected;
     }
 
     async _clickNextPage() {
@@ -1326,9 +1520,10 @@ class Client extends EventEmitter {
             const wanted = clean(label).toLowerCase();
             const matches = [...document.querySelectorAll('input:not([type="password"]), textarea, [role="textbox"], [contenteditable="true"]')]
                 .filter((candidate) => {
-                    const actual = clean(
+                const actual = clean(
                         candidate.getAttribute('aria-label') ||
                         (candidate.id && document.querySelector(`label[for="${CSS.escape(candidate.id)}"]`)?.innerText) ||
+                        candidate.closest('label')?.innerText ||
                         candidate.getAttribute('placeholder'),
                     ).toLowerCase();
                     return visible(candidate) && !candidate.disabled && !candidate.readOnly &&

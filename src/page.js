@@ -10,6 +10,7 @@ module.exports = function snapshot({ maxText = 30000, maxElements = 250, report 
     };
     const labelFor = (element) => clean(element.getAttribute('aria-label') ||
         (element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]')?.innerText) ||
+        element.closest('label')?.innerText ||
         element.getAttribute('placeholder') || element.innerText || element.textContent);
     const root = document.documentElement;
     let counter = Number(root.dataset.gtmElementCounter || 0);

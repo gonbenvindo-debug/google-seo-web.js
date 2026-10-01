@@ -131,6 +131,11 @@ function createApiServer(client, { apiKey } = {}) {
                 maxText: integerParam(url.searchParams, 'maxText', 30000, 1000, 100000),
                 maxElements: integerParam(url.searchParams, 'maxElements', 250, 1, 1000),
             });
+            const merchantCatalogOptions = () => ({
+                status: url.searchParams.get('status') || 'all',
+                query: url.searchParams.get('query') || undefined,
+                maxPages: integerParam(url.searchParams, 'maxPages', 50, 1, 500),
+            });
             const performanceOptions = () => ({
                 property: url.searchParams.get('property') || undefined,
                 dimension: url.searchParams.get('dimension') || 'queries',
@@ -212,6 +217,28 @@ function createApiServer(client, { apiKey } = {}) {
             if (route === 'POST /browser/stop') {
                 await client.destroy();
                 return sendJson(200, await client.getStatus());
+            }
+            if (route === 'GET /merchant-center/catalog' || route === 'GET /merchant-center/catalog.csv') {
+                await ensureBrowser('merchant-center');
+                const catalog = await client.getMerchantCenterCatalog(merchantCatalogOptions());
+                if (route.endsWith('.csv')) {
+                    const headers = catalog.products[0] ? Object.keys(catalog.products[0])
+                        : catalog.tables?.find(({ headers }) => headers.includes('Product ID'))?.headers || ['Product ID'];
+                    return sendReport({ ...catalog, tables: [{ headers, rows: catalog.products.map((product) => headers.map((header) => product[header])) }] }, 'merchant-center-catalog.csv');
+                }
+                return sendJson(catalog.complete === false ? 206 : 200, catalog);
+            }
+            if (route === 'POST /merchant-center/product/edit') {
+                await ensureBrowser('merchant-center');
+                return sendJson(200, await client.openMerchantCenterProduct(body));
+            }
+            if (route === 'POST /merchant-center/forms/preview') {
+                await ensureBrowser('merchant-center');
+                return sendJson(200, await client.prepareMerchantCenterForm(body));
+            }
+            if (route === 'POST /merchant-center/forms/apply') {
+                await ensureBrowser('merchant-center');
+                return sendJson(200, await client.applyMerchantCenterForm(body));
             }
             if (['GET /search-console/performance', 'GET /search-console/performance.csv', 'GET /search-console/graph'].includes(route)) {
                 await ensureBrowser();
