@@ -3,7 +3,6 @@
 module.exports = {
     Client: require('./src/Client'),
     LocalAuth: require('./src/authStrategies/LocalAuth'),
-    GoogleApiClient: require('./src/google-api'),
     Services: require('./src/Constants').Services,
     SearchConsoleReports: require('./src/Constants').SearchConsoleReports,
     GoogleAdsReports: require('./src/Constants').GoogleAdsReports,

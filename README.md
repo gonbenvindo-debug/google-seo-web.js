@@ -1,236 +1,140 @@
 # Google Tools Manager
 
-Google Tools Manager is a local Node.js API and browser controller for Google Search Console, Google Ads, AdSense, Merchant Center, PageSpeed Insights, and other Google tools.
+App local em Node.js e Puppeteer para gerir serviços Google com uma sessão
+persistente do Chrome. Search Console, Google Ads, Merchant Center, Analytics
+e AdSense partilham o login; PageSpeed, Trends e outras ferramentas usam o mesmo
+browser. Não é necessário configurar OAuth, refresh tokens ou chaves Google.
 
-It keeps a persistent Chromium session, lets you complete Google login manually, and exposes JSON and CSV endpoints for reports, indexing, sitemaps, URL inspection, PageSpeed, and browser control.
+## Iniciar
 
-## Requirements
-
-- Node.js 22.12 or newer
-- Google Chrome on Windows; Puppeteer's Chromium on other platforms
-
-## Install and run
+Requer Node.js 22.12+ e Google Chrome no Windows; nas restantes plataformas usa
+o Chromium instalado pelo Puppeteer.
 
 ```bash
-npm install
+npm ci
 npm start
 ```
 
-The API listens on `http://127.0.0.1:3100`.
+Durante o desenvolvimento, `npm run dev` recarrega o servidor quando alteras o código.
 
-Start the Google login flow:
+A API fica disponível em `http://127.0.0.1:3100`. Para abrir o Analytics:
 
 ```bash
 curl -X POST http://127.0.0.1:3100/auth/login \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"service":"analytics"}'
 ```
 
-Complete login and 2FA in the browser window that opens. The session is stored locally and reused on the next run.
+Se o perfil ainda não tiver sessão, o Chrome abre para introduzires o login e 2FA
+manualmente. Depois a app continua em segundo plano. A sessão fica guardada em
+`.google-seo-auth/`; parar o browser conserva-a, fazer logout apaga-a.
 
-Read the current page:
+## Um fluxo para todos os serviços
 
-```bash
-curl http://127.0.0.1:3100/browser/state
-```
-
-## Configuration
-
-| Variable | Default | Description |
-|---|---:|---|
-| `GOOGLE_SEO_API_PORT` | `3100` | Local API port |
-| `GOOGLE_SEO_API_KEY` | empty | Protects the API with a Bearer token |
-| `PAGESPEED_API_KEY` | empty | Optional PageSpeed Insights API key |
-| `GOOGLE_OAUTH_CLIENT_ID` | empty | OAuth client for direct Google APIs |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | empty | OAuth client secret |
-| `GOOGLE_OAUTH_REFRESH_TOKEN` | empty | Refresh token authorized for the Google APIs you use (Merchant, Ads and/or AdSense) |
-| `GOOGLE_ADS_DEVELOPER_TOKEN` | empty | Required by direct Google Ads API routes |
-| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | empty | Optional manager account ID for Google Ads API |
-| `GOOGLE_ADS_API_VERSION` | `v24` | Google Ads REST API version |
-
-When `GOOGLE_SEO_API_KEY` is set, send:
-
-```http
-Authorization: Bearer YOUR_API_KEY
-```
-
-The server binds to `127.0.0.1` only. All `POST` requests require `Content-Type: application/json`, including requests with an empty body (`{}`).
-
-## Endpoints
-
-Base URL: `http://127.0.0.1:3100`
-
-### Session and browser control
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/health` | Browser and Google session status |
-| GET | `/auth/status` | Alias of `/health` |
-| GET | `/services` | List allowed services and URLs |
-| POST | `/auth/login` | Open or reuse a Google login session |
-| POST | `/auth/logout` | Close the browser and delete the saved session |
-| POST | `/browser/start` | Start the browser for a service |
-| POST | `/browser/open` | Open an allowed service or HTTPS URL |
-| GET | `/browser/state` | Read page text, headings, links, controls, and charts |
-| POST | `/browser/click` | Click a control by its ID from `/browser/state` |
-| POST | `/browser/type` | Type into a control by its ID |
-| POST | `/browser/back` | Go back one page |
-| POST | `/browser/reload` | Reload the current page |
-| GET | `/browser/screenshot` | Return a PNG screenshot |
-| POST | `/browser/stop` | Stop the browser and keep the saved session |
-
-### Search Console
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/search-console/reports` | List available Search Console reports |
-| GET | `/search-console/navigation` | Alias of `/search-console/reports` |
-| GET | `/search-console/report` | Read any report by name or internal path |
-| GET | `/search-console/report.csv` | Export a report table as CSV |
-| GET | `/search-console/performance` | Read performance data by dimension |
-| GET | `/search-console/performance.csv` | Export performance data as CSV |
-| GET | `/search-console/graph` | Read daily performance data and chart information |
-| GET | `/search-console/time-gaps` | Find missing days in a performance range |
-| GET | `/search-console/summary` | Get a compact multi-area SEO summary |
-| GET | `/search-console/notifications` | Read Search Console notifications |
-| GET | `/search-console/links` | Read the links report and drilldowns |
-| GET | `/search-console/url-inspection` | Inspect a URL without starting an external action |
-| POST | `/search-console/url-inspection` | Run a live test or request indexing |
-| GET | `/search-console/sitemaps` | List submitted sitemaps |
-| POST | `/search-console/sitemaps` | Submit a sitemap |
-| GET | `/search-console/indexing` | Read indexing status and reasons |
-| GET | `/search-console/validations` | Alias for the indexing report |
-| GET | `/search-console/indexing/pages` | List indexed and non-indexed URLs |
-| GET | `/search-console/indexing/pages.csv` | Export indexed pages as CSV |
-| POST | `/search-console/control` | Operate a visible control by its label |
-| POST | `/search-console/filter` | Alias for semantic Search Console control |
-
-Useful Search Console query parameters include `property`, `report`, `path`, `dimension`, `period`, `startDate`, `endDate`, `allPages`, `maxPages`, `status`, `reason`, `urlContains`, `language`, and `crawled`.
-
-Examples:
+`GET /services` lista as chaves dos serviços. Para cada chave existem as mesmas
+operações:
 
 ```text
-GET /search-console/performance?dimension=queries&period=28-days
-GET /search-console/report?report=links&allPages=true
-GET /search-console/url-inspection?url=https%3A%2F%2Fexample.com%2F
+GET  /analytics/reports
+GET  /analytics/report
+GET  /analytics/state
+GET  /analytics/navigation
+POST /analytics/navigate   {"target":"<URL observada no painel>"}
+POST /analytics/control    {"label":"<controlo observado>"}
+GET  /analytics/report?report=current
 ```
 
-Actions that change Google data require `POST`:
+Troca `analytics` por `adsense`, `merchant-center`, `google-ads`, `search-console`,
+`trends` ou qualquer outra chave do catálogo. `report` lê as tabelas, métricas,
+gráficos acessíveis e texto da página; `state` permite localizar controlos e IDs.
+`navigate` aceita apenas destinos do serviço indicado.
 
-```json
-POST /search-console/url-inspection
-{"url":"https://example.com/","action":"live"}
-```
+A mesma extração e paginação serve todas as apps. Há uma página partilhada e uma
+fila de operações para evitar que uma leitura ou ação aconteça na app errada.
+Os endpoints específicos do Search Console e do Keyword Planner continuam
+disponíveis. Consulta [API.md](API.md) para os parâmetros e exemplos.
 
-```json
-POST /search-console/sitemaps
-{"sitemap":"https://example.com/sitemap.xml"}
-```
+## Adicionar serviços e endpoints
 
-`action: "index"` requests indexing. These actions affect external Google data.
+O catálogo está em [src/Constants.js](src/Constants.js). Uma entrada com `name` e
+`url` ganha automaticamente os endpoints `reports`, `report`, `state`,
+`navigation`, `navigate` e `control`. Usa `login: true` para painéis privados.
+O host é acrescentado automaticamente à lista permitida.
 
-### Google Ads
-
-Reuse the same Google session by calling `POST /auth/login` with `{"service":"google-ads"}`. An existing Ads account with access to the requested tools is required. This integration uses the web interface, not the Google Ads API.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/google-ads/accounts` | Open the account picker and read visible accounts |
-| POST | `/google-ads/account` | Select an account using its returned `url` |
-| GET | `/google-ads/reports` | List report names and URLs |
-| GET | `/google-ads/navigation` | Read links on the current Ads page |
-| GET | `/google-ads/state` | Read current page and control IDs |
-| GET | `/google-ads/report` | Read a named report, an Ads `path`, or `report=current` |
-| GET | `/google-ads/report.csv` | Export a report table |
-| GET | `/google-ads/{report}` | Shortcut for any report below; also supports `.csv` |
-| POST | `/google-ads/keyword-ideas` | Discover keywords from `keywords` and/or `website` |
-| POST | `/google-ads/keyword-forecast` | Submit `keywords` for volume and forecasts |
-| POST | `/google-ads/control` | Click a `label` or fill it with `text`; optional `submit` |
-| POST | `/google-ads/filter` | Same control operation, for visible filter fields |
-
-Reports: `overview`, `campaigns`, `ad-groups`, `ads`, `keywords`, `search-terms`, `landing-pages`, `assets`, `ad-assets`, `asset-groups`, `audiences`, `conversions`, `conversion-goals`, `attribution`, `change-history`, `keyword-planner`, `data-manager`, `preferences`, `recommendations`, `budgets`, `devices`, `geographic`, `demographics`, `placements`, `negative-keywords`, `shopping-products`, `billing`, `campaign-diagnostics`.
-
-```bash
-curl -X POST http://127.0.0.1:3100/auth/login -H "Content-Type: application/json" -d '{"service":"google-ads"}'
-curl 'http://127.0.0.1:3100/google-ads/search-terms?allPages=true'
-curl -X POST http://127.0.0.1:3100/google-ads/keyword-ideas -H "Content-Type: application/json" -d '{"keywords":["running shoes","trail shoes"]}'
-```
-
-Reports contain visible tables, metrics, charts, controls and links. `allPages=true` follows pagination up to `maxPages` (default 50, maximum 500). `complete=false` means partial data; `null` means completeness could not be verified. CSV requires verified completeness unless `allowPartial=true` is supplied.
-
-### Google Merchant Center
-
-Use `POST /auth/login` with `{"service":"merchant-center"}` to open the shared Google login. This integration reads and controls the authenticated Merchant Center web interface; it is not the official Merchant API.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/merchant-center/reports` | List named Merchant Center sections |
-| GET | `/merchant-center/state` | Read the current page, controls and account context |
-| GET | `/merchant-center/navigation` | Discover links in the signed-in Merchant Center account |
-| GET | `/merchant-center/report` | Read a named report or a Merchant Center `path` |
-| GET | `/merchant-center/{report}` | Shortcut for a named report; supports `.csv` |
-| POST | `/merchant-center/navigate` | Open a returned Merchant Center path or URL |
-| POST | `/merchant-center/control` | Click or fill a visible control by label |
-| POST | `/merchant-center/filter` | Alias for visible control operations |
-
-Sections: `overview`, `products`, `diagnostics`, `performance`, `marketing`, `campaigns`, `promotions`, `data-sources`, `shipping-returns`, `notifications`, `settings`. See [Merchant Center endpoints](API.md#google-merchant-center-web-session).
-
-Merchant Center and Ads controls operate real account screens. UI availability depends on permissions and Google's current layout. Review the state endpoint before calling controls; saves and campaign changes can affect products or advertising spend. For direct API access, configure OAuth using `.env.example`; Google Ads also requires a developer token.
-
-The optional direct REST endpoints support Merchant API resource methods and Google Ads GAQL searches and resource mutations:
-
-```text
-GET  /api/merchant/accounts/v1/accounts
-GET  /api/merchant/products/v1/accounts/{accountId}/products?pageSize=100
-POST /api/merchant/reports/v1/accounts/{accountId}/reports:search
-POST /api/google-ads/{customerId}/googleAds:search
-POST /api/google-ads/{customerId}/googleAds:searchStream
-POST /api/google-ads/{customerId}/campaigns:mutate
-```
-
-For Merchant Center and Google Ads, the OAuth refresh token must include `https://www.googleapis.com/auth/content` and `https://www.googleapis.com/auth/adwords`, respectively. Google Ads IDs use digits without hyphens. Manager accounts can be set with `GOOGLE_ADS_LOGIN_CUSTOMER_ID` or `loginCustomerId` on a request. Direct API mutations update the real Google account. See [API.md](API.md) for full parameters.
-
-AdSense publishers can use the AdSense Management API v2 at `/api/adsense/` with the `https://www.googleapis.com/auth/adsense.readonly` scope for reads or `https://www.googleapis.com/auth/adsense` for writes. The H5 Games Ad Placement API runs in the game page and uses `adBreak()` and `adConfig()`; see [API.md](API.md#adsense-e-h5-games).
-
-Google's UI, account permissions and setup affect availability. Keyword Planner helpers target English/Portuguese labels; use `/google-ads/state` and `/google-ads/control` if labels differ. CSV export requires verified completeness unless `allowPartial=true`. Unavailable reports that redirect elsewhere return HTTP 409.
-
-### PageSpeed Insights
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/pagespeed/report` | Get Lighthouse, Core Web Vitals, audits, and opportunities |
-| GET | `/pagespeed/report.csv` | Export PageSpeed audits as CSV |
-
-Required query parameter: `url`.
-
-Optional parameters: `strategy=mobile|desktop`, repeated or comma-separated `category` values, `locale`, and `raw=true`.
-
-Example:
-
-```text
-GET /pagespeed/report?url=https%3A%2F%2Fexample.com%2F&strategy=mobile
-```
-
-## Library usage
+Relatórios nomeados são apenas entradas em `reports`. Por exemplo:
 
 ```js
-const { Client, LocalAuth } = require('google-tools-manager');
-
-const client = new Client({
-  authStrategy: new LocalAuth({ clientId: 'my-project' }),
-});
-
-await client.initialize('search-console');
-console.log(await client.getState());
+'merchant-center': {
+    name: 'Google Merchant Center',
+    url: 'https://merchants.google.com/mc/',
+    login: true,
+    reports: { overview: 'overview', products: 'items' },
+}
 ```
 
-## Security
+`products` cria os atalhos `GET /merchant-center/products` e
+`GET /merchant-center/products.csv`. Não precisas de duplicar autenticação,
+navegação, extração ou handlers HTTP. Para ações que envolvam vários passos,
+reutiliza os métodos do `Client` e os controlos observados na página.
 
-- Credentials and 2FA are entered only in the Google browser window; they are never sent through this API.
-- The persistent session is stored in `.google-seo-auth/`. Do not share or commit it.
-- Use `GOOGLE_SEO_API_KEY` if another local process can reach the API.
-- Read `/browser/state` before using browser controls. Element IDs are temporary and change after navigation or reload.
+## Configuração local
 
-## License
+`.env` é opcional e é carregado pelo Node.js no arranque:
+
+| Variável | Padrão | Função |
+|---|---|---|
+| `PORT` | 3100 | Porta HTTP, limitada a `127.0.0.1` |
+| `API_KEY` | vazio | Token Bearer opcional para proteger os pedidos locais |
+
+As antigas variáveis `GOOGLE_SEO_API_PORT` e `GOOGLE_SEO_API_KEY` continuam aceites.
+`API_KEY` protege a tua app local; não é uma chave Google.
+
+Os antigos proxies `/api/merchant/*`, `/api/google-ads/*`, `/api/adsense/*` e
+`GoogleApiClient` foram removidos. PageSpeed também usa a interface web; os dados
+de auditoria correspondem ao conteúdo renderizado, sem o payload completo da
+API Lighthouse. H5 Games continua a exigir a integração AdSense na página do jogo,
+documentada em [API.md](API.md).
+
+## Usar como biblioteca
+
+```js
+const { Client } = require('google-tools-manager');
+
+const client = new Client();
+await client.initialize('analytics');
+console.log(await client.getReport('analytics'));
+console.log(await client.getNavigation('analytics'));
+await client.destroy();
+```
+
+`LocalAuth({ clientId, dataPath })` permite selecionar outro perfil local.
+Os métodos anteriores de Search Console, Ads e Merchant Center delegam no fluxo
+comum e continuam disponíveis.
+
+## Limites e segurança
+
+O acesso depende das permissões da conta Google e da interface de cada produto.
+Analytics e AdSense disponibilizam `overview` e `current`; use links e controlos
+observados para selecionar contas, propriedades e relatórios.
+
+A extração cobre conteúdo visível. `complete` distingue completude comprovada,
+incompletude e ausência de evidência; CSV exige completude ou `allowPartial=true`.
+Alterações na interface Google podem exigir ajustes nos rótulos ou caminhos.
+
+Introduz credenciais apenas no Chrome. O perfil local contém a sessão Google:
+não o partilhes nem o publiques. Lê um estado novo antes de clicar; os IDs são
+temporários. Controlos de campanhas e configurações atuam sobre a conta real.
+
+## Verificação
+
+```bash
+npm test
+```
+
+Os checks cobrem URLs e contexto de conta, handlers HTTP, validação de entrada,
+CSV incompleto e extração/controlo no Puppeteer usando uma página simulada local.
+Não alteram contas Google reais.
+
+## Licença
 
 MIT

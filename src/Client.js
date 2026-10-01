@@ -7,12 +7,11 @@ const net = require('net');
 const path = require('path');
 const puppeteer = require('puppeteer');
 const LocalAuth = require('./authStrategies/LocalAuth');
+const snapshot = require('./page');
 const {
     AllowedHosts,
     Events,
     GoogleAdsReports,
-    LoginURL,
-    MerchantCenterReports,
     SearchConsoleReports,
     Services,
 } = require('./Constants');
@@ -38,7 +37,7 @@ class Client extends EventEmitter {
             ...options,
             puppeteer: { ...DEFAULT_OPTIONS.puppeteer, ...options.puppeteer },
         };
-        if (!Services[this.options.defaultService]) throw new TypeError('Unknown default service');
+        if (!Object.hasOwn(Services, this.options.defaultService)) throw new TypeError('Unknown default service');
         this.authStrategy = options.authStrategy || new LocalAuth();
         this.authStrategy.setup(this);
         this.pupBrowser = null;
@@ -47,73 +46,45 @@ class Client extends EventEmitter {
         this._destroying = false;
         this._pageQueue = Promise.resolve();
         this._searchConsoleResource = options.searchConsoleProperty || null;
-        this._googleAdsContext = {};
-        this._merchantCenterContext = {};
+        this._contexts = {};
     }
 
     async initialize(target = this.options.defaultService) {
         if (this.pupBrowser) throw new Error('Client is already initialized');
-        const requestedService = this.resolveTarget(target).service;
-        const service = ['google-ads', 'merchant-center'].includes(requestedService) ? requestedService : 'search-console';
-        const loginUrl = service === 'search-console'
-            ? LoginURL
-            : `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(Services[service].url)}`;
+        const destination = this.resolveTarget(target);
+        const service = destination.service;
+        const loginUrl = Services[service]?.login
+            ? 'https://accounts.google.com/ServiceLogin?continue=' + encodeURIComponent(destination.url)
+            : null;
         this._destroying = false;
         try {
             await this.authStrategy.beforeBrowserInitialized();
             await this._launchBrowser({ ...this.options.puppeteer, headless: true });
-            await this.pupPage.goto(Services[service].url, {
-                waitUntil: 'domcontentloaded',
-                timeout: 60000,
-            });
-            await sleep(1000);
-
+            await this.pupPage.goto(destination.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await this._waitForPage();
             let visibleLogin = false;
-            if (!(await this._isServiceAuthenticated(service))) {
-                if (this.options.puppeteer.headless === false) {
-                    await this._restartBrowser(this.options.puppeteer);
-                    visibleLogin = true;
-                }
+            if (loginUrl && !(await this._isServiceAuthenticated(service))) {
+                visibleLogin = this.options.puppeteer.headless === false;
+                if (visibleLogin) await this._restartBrowser(this.options.puppeteer);
                 this.emit(Events.LOGIN_REQUIRED, { url: loginUrl });
-                await this.pupPage.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 0 });
+                await this.pupPage.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
                 try {
                     await this._waitForAuthentication(service, loginUrl);
                 } catch (error) {
                     this.emit(Events.AUTHENTICATION_FAILURE, error.message);
                     throw error;
                 }
-
-                if (visibleLogin) {
-                    await this.pupPage.setContent(`<!doctype html>
-                        <html lang="pt"><meta charset="utf-8"><title>Google autenticado</title>
-                        <style>
-                            body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-                                font: 16px system-ui; color: #171717; background: #fff; text-align: center; }
-                            b { display: grid; place-items: center; width: 52px; height: 52px; margin: auto;
-                                border-radius: 50%; color: #fff; background: #16a34a; font-size: 28px; }
-                            h1 { margin: 18px 0 8px; font-size: 22px; }
-                            p { margin: 0; color: #666; }
-                        </style><main><b>✓</b><h1>Autenticação concluída</h1>
-                        <p>A janela vai fechar automaticamente.</p></main></html>`);
-                    await sleep(1500);
-                }
-            } else if (!this.options.headlessAfterLogin && this.options.puppeteer.headless === false) {
+            }
+            if (visibleLogin && this.options.headlessAfterLogin) {
+                await this._restartBrowser({ ...this.options.puppeteer, headless: true });
+            } else if (!visibleLogin && !this.options.headlessAfterLogin && this.options.puppeteer.headless === false) {
                 await this._restartBrowser(this.options.puppeteer);
             }
-
-            if (visibleLogin && this.options.headlessAfterLogin) {
-                await this._restartHeadless();
-                await this.pupPage.goto(Services[service].url, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 60000,
-                });
-                await sleep(1000);
-                if (!(await this._isServiceAuthenticated(service))) {
-                    throw new Error('Google session was not persisted after login');
-                }
-            }
-            this.emit(Events.AUTHENTICATED);
             await this.open(target);
+            if (loginUrl) {
+                await this._requireService(service);
+                this.emit(Events.AUTHENTICATED);
+            }
             this.emit(Events.READY, await this.getStatus());
             return this;
         } catch (error) {
@@ -123,7 +94,7 @@ class Client extends EventEmitter {
     }
 
     resolveTarget(target = this.options.defaultService) {
-        if (Services[target]) return { service: target, url: Services[target].url };
+        if (Object.hasOwn(Services, target)) return { service: target, url: this._serviceUrl(target) };
 
         let url;
         try {
@@ -135,6 +106,7 @@ class Client extends EventEmitter {
             url.protocol !== 'https:' ||
             url.username ||
             url.password ||
+            url.port ||
             !AllowedHosts.has(url.hostname)
         ) {
             throw new TypeError(`URL host is not allowed: ${url.hostname || target}`);
@@ -153,6 +125,7 @@ class Client extends EventEmitter {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000,
             });
+            await this._waitForPage();
             const status = await this.getStatus();
             this.emit(Events.PAGE_CHANGED, status);
             return status;
@@ -170,20 +143,19 @@ class Client extends EventEmitter {
             };
         }
         const url = this.pupPage.url();
-        try {
-            const current = new URL(url);
-            const resource = current.hostname === 'search.google.com' && current.searchParams.get('resource_id');
-            if (resource) this._searchConsoleResource = resource;
-            if (current.hostname === 'ads.google.com' && current.pathname.startsWith('/aw/')) {
-                this._googleAdsContext = Object.fromEntries(['euid', 'ocid', 'authuser']
-                    .filter((name) => current.searchParams.has(name))
-                    .map((name) => [name, current.searchParams.get(name)]));
-            }
-        } catch {}
+        const service = this._serviceForUrl(url);
+        const current = new URL(url);
+        const resource = service === 'search-console' && current.searchParams.get('resource_id');
+        if (resource) this._searchConsoleResource = resource;
+        const context = Object.fromEntries((Services[service]?.context || [])
+            .filter((name) => current.searchParams.has(name))
+            .map((name) => [name, current.searchParams.get(name)]));
+        if (Object.keys(context).length) this._contexts[service] = context;
         const hasGoogleSession = await this._isAuthenticated();
         return {
             running: true,
-            service: this._serviceForUrl(url),
+            service,
+            account: this._contexts[service] || {},
             url,
             title: await this.pupPage.title(),
             googleSession: url.includes('accounts.google.com') || url.includes('/search-console/about')
@@ -192,217 +164,104 @@ class Client extends EventEmitter {
         };
     }
 
-    async getState({ maxText = 30000, maxElements = 250 } = {}) {
+    getState(options = {}) {
+        return this._runPageTask(() => this._getState(options));
+    }
+
+    async _getState({ maxText = 30000, maxElements = 250 } = {}) {
         this._requirePage();
-        if (!Number.isInteger(maxText) || maxText < 1000 || maxText > 100000) {
-            throw new TypeError('maxText must be an integer between 1000 and 100000');
+        if (!Number.isInteger(maxText) || maxText < 1000 || maxText > 100000 ||
+            !Number.isInteger(maxElements) || maxElements < 1 || maxElements > 1000) {
+            throw new TypeError('maxText must be 1000 to 100000; maxElements must be 1 to 1000');
         }
-        if (!Number.isInteger(maxElements) || maxElements < 1 || maxElements > 1000) {
-            throw new TypeError('maxElements must be an integer between 1 and 1000');
-        }
-
-        const page = await this.pupPage.evaluate(({ maxText, maxElements }) => {
-            const root = document.documentElement;
-            let counter = Number(root.dataset.googleSeoElementCounter || 0);
-            const clean = (value, limit = 500) => String(value || '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .slice(0, limit);
-            const visible = (element) => {
-                const style = getComputedStyle(element);
-                const rect = element.getBoundingClientRect();
-                return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-            };
-            const labelFor = (element) => {
-                const explicit = element.id
-                    ? document.querySelector(`label[for="${CSS.escape(element.id)}"]`)?.innerText
-                    : '';
-                return clean(
-                    element.getAttribute('aria-label') ||
-                    explicit ||
-                    element.getAttribute('placeholder') ||
-                    element.innerText ||
-                    element.textContent,
-                );
-            };
-            const elements = [...document.querySelectorAll([
-                'a[href]',
-                'button',
-                'input',
-                'textarea',
-                'select',
-                '[role="button"]',
-                '[role="link"]',
-                '[role="textbox"]',
-                '[role="combobox"]',
-                '[role="tab"]',
-                '[role="menuitem"]',
-                '[role="option"]',
-                '[role="radio"]',
-                '[role="checkbox"]',
-            ].join(','))]
-                .filter(visible)
-                .slice(0, maxElements)
-                .map((element) => {
-                    let id = element.getAttribute('data-google-seo-id');
-                    if (!id) {
-                        id = `e${++counter}`;
-                        element.setAttribute('data-google-seo-id', id);
-                    }
-                    const type = element.getAttribute('type') || undefined;
-                    const value = 'value' in element && type !== 'password'
-                        ? clean(element.value)
-                        : undefined;
-                    return {
-                        id,
-                        tag: element.tagName.toLowerCase(),
-                        role: element.getAttribute('role') || undefined,
-                        type,
-                        label: labelFor(element),
-                        href: element.href || undefined,
-                        value,
-                        disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'),
-                    };
-                });
-            root.dataset.googleSeoElementCounter = String(counter);
-            const bodyText = String(document.body?.innerText || '')
-                .replace(/[ \t]+\n/g, '\n')
-                .replace(/\n{3,}/g, '\n\n')
-                .trim()
-                .slice(0, maxText);
-            const headings = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')]
-                .filter(visible)
-                .map((element) => clean(element.innerText || element.textContent))
-                .filter(Boolean)
-                .slice(0, 100);
-            const visuals = [...document.querySelectorAll('canvas, svg, [role="img"]')]
-                .filter(visible)
-                .map((element) => ({
-                    tag: element.tagName.toLowerCase(),
-                    label: clean(element.getAttribute('aria-label') || element.getAttribute('title')),
-                }))
-                .filter(({ label }) => label)
-                .slice(0, 100);
-            return { bodyText, headings, elements, visuals };
-        }, { maxText, maxElements });
-
-        return { ...(await this.getStatus()), ...page };
+        return { ...(await this.getStatus()), ...(await this.pupPage.evaluate(snapshot, { maxText, maxElements })) };
     }
 
-    getGoogleAdsReports() {
-        return Object.entries(GoogleAdsReports).map(([name, path]) => ({ name, url: this._googleAdsUrl(path) }));
+    getReports(service, { property } = {}) {
+        if (!Object.hasOwn(Services, service)) throw new TypeError('Unknown service: ' + service);
+        const config = Services[service];
+        return Object.entries(config.reports || { overview: config.home || '' }).map(([name, path]) => ({
+            name,
+            url: service === 'search-console' && (property || this._searchConsoleResource)
+                ? this._searchConsoleUrl(path, this._searchConsoleProperty(property))
+                : this._serviceUrl(service, path),
+        }));
     }
 
-    getMerchantCenterReports() {
-        return Object.entries(MerchantCenterReports).map(([name, path]) => ({ name, path }));
-    }
-
-    getMerchantCenterState() {
+    getReport(service, { report = 'overview', path, property, tab, allPages = false, maxPages = 50 } = {}) {
         return this._runPageTask(async () => {
-            await this._requireMerchantCenter();
-            return { ...(await this.getState()), account: { ...this._merchantCenterContext } };
-        });
-    }
-
-    getMerchantCenterNavigation() {
-        return this._runPageTask(async () => {
-            await this._openMerchantCenter('');
-            const report = await this._collectMerchantCenterReport();
-            return {
-                url: report.url,
-                account: report.account,
-                links: report.links.filter(({ url }) => {
-                    try {
-                        const target = new URL(url);
-                        return target.protocol === 'https:' && target.hostname === 'merchants.google.com';
-                    } catch { return false; }
-                }),
-            };
-        });
-    }
-
-    getMerchantCenterReport({ report = 'overview', path, allPages = false, maxPages = 50 } = {}) {
-        return this._runPageTask(async () => {
+            if (!Object.hasOwn(Services, service)) throw new TypeError('Unknown service: ' + service);
             if (typeof allPages !== 'boolean' || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
-                throw new TypeError('allPages must be boolean and maxPages must be an integer between 1 and 500');
+                throw new TypeError('allPages must be boolean; maxPages must be an integer between 1 and 500');
             }
-            if (path !== undefined) {
-                await this._openMerchantCenter(path);
+            if (tab !== undefined && (typeof tab !== 'string' || !tab.trim())) throw new TypeError('tab must be a non-empty string');
+            const reports = Services[service].reports || { overview: Services[service].home || '' };
+            if (path === undefined && report !== 'current' && !Object.hasOwn(reports, report)) {
+                throw new TypeError('Unknown report for ' + service + ': ' + report);
+            }
+            if (path !== undefined || report !== 'current') {
+                const target = path === undefined ? reports[report] : path;
+                await this._openService(service, service === 'search-console'
+                    ? this._searchConsoleUrl(target, this._searchConsoleProperty(property))
+                    : target);
             } else {
-                if (!Object.hasOwn(MerchantCenterReports, report)) throw new TypeError(`Unknown Merchant Center report: ${report}`);
-                await this._openMerchantCenter(MerchantCenterReports[report]);
+                await this._requireService(service);
             }
-            return this._collectMerchantCenterReport({ allPages, maxPages });
+            if (tab) await this._actByLabel(service, [tab], undefined, { selector: '[role="tab"]' });
+            return this._collectCurrentReport({ allPages, maxPages });
         });
     }
 
-    controlMerchantCenter({ label, text, submit = false, exact = true } = {}) {
+    getServiceState(service, options = {}) {
+        return this._runPageTask(async () => {
+            if (this._serviceForUrl(this.pupPage?.url() || 'about:blank') !== service) await this._openService(service);
+            await this._requireService(service);
+            return this._getState(options);
+        });
+    }
+
+    getNavigation(service) {
+        return this._runPageTask(async () => {
+            if (this._serviceForUrl(this.pupPage?.url() || 'about:blank') !== service) await this._openService(service);
+            await this._requireService(service);
+            const report = await this._extractReport();
+            return {
+                service, url: report.url, account: report.account, property: report.property,
+                links: report.links.filter(({ url }) => this._serviceForUrl(url) === service),
+            };
+        });
+    }
+
+    navigate(service, target) {
+        return this._runPageTask(() => this._openService(service, target));
+    }
+
+    control(service, { label, text, submit = false, exact = true } = {}) {
         return this._runPageTask(async () => {
             if (typeof label !== 'string' || !label.trim() || (text !== undefined && typeof text !== 'string') ||
                 typeof submit !== 'boolean' || typeof exact !== 'boolean') {
                 throw new TypeError('label must be a non-empty string; text a string; submit and exact booleans');
             }
-            await this._requireMerchantCenter();
-            const changed = text === undefined
-                ? await this._clickByLabel(label, { exact, unique: true })
-                : await this._typeByLabel(label, text, { submit, exact, unique: true });
-            if (!changed) throw Object.assign(new Error(`Merchant Center control not available: ${label}. Inspect /merchant-center/state for current labels or permissions.`), { status: 409 });
-            await this.pupPage.waitForNetworkIdle({ idleTime: 400, timeout: 3000 }).catch((error) => {
-                if (error.name !== 'TimeoutError') throw error;
-            });
-            await sleep(500);
-            return this._collectMerchantCenterReport();
+            await this._requireService(service);
+            await this._actByLabel(service, [label], text, { submit, exact });
+            return this._collectCurrentReport();
         });
     }
 
-    async _openMerchantCenter(target) {
-        this._requirePage();
-        const url = this._merchantCenterUrl(target);
-        await this.pupPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await sleep(1000);
-        await this._requireMerchantCenter();
-        return this.getStatus();
-    }
-
-    _merchantCenterUrl(target = '') {
-        if (typeof target !== 'string') throw new TypeError('Merchant Center path must be a string');
-        const url = new URL(target, Services['merchant-center'].url);
-        if (url.protocol !== 'https:' || url.hostname !== 'merchants.google.com' || url.port || url.username || url.password) {
-            throw new TypeError('Merchant Center URL must use https://merchants.google.com/');
-        }
-        if (!['account', 'accountId', 'authuser'].some((name) => url.searchParams.has(name))) {
-            for (const [name, value] of Object.entries(this._merchantCenterContext)) url.searchParams.set(name, value);
-        }
-        return url.href;
-    }
-
-    async _requireMerchantCenter() {
-        this._requirePage();
-        if (!(await this._isServiceAuthenticated('merchant-center'))) {
-            throw Object.assign(new Error('Open Merchant Center with POST /auth/login {"service":"merchant-center"}; the current page is not an authenticated Merchant Center page'), { status: 409 });
-        }
-        await this.getStatus();
-    }
-
-    async _collectMerchantCenterReport(options = {}) {
-        await this._requireMerchantCenter();
-        const url = new URL(this.pupPage.url());
-        this._merchantCenterContext = Object.fromEntries(['account', 'accountId', 'authuser']
-            .filter((name) => url.searchParams.has(name))
-            .map((name) => [name, url.searchParams.get(name)]));
-        const report = await this._collectCurrentReport(options);
-        return {
-            ...report,
-            account: { ...this._merchantCenterContext },
-            source: 'merchant-center-web-ui',
-            extraction: 'Rendered rows only; virtualized rows, hidden columns and unavailable reports may be missing.',
-        };
-    }
+    getGoogleAdsReports() { return this.getReports('google-ads'); }
+    getMerchantCenterReports() { return this.getReports('merchant-center'); }
+    getGoogleAdsState() { return this.getServiceState('google-ads'); }
+    getMerchantCenterState() { return this.getServiceState('merchant-center'); }
+    getMerchantCenterNavigation() { return this.getNavigation('merchant-center'); }
+    getGoogleAdsReport(options) { return this.getReport('google-ads', options); }
+    getMerchantCenterReport(options) { return this.getReport('merchant-center', options); }
+    controlGoogleAds(options) { return this.control('google-ads', options); }
+    controlMerchantCenter(options) { return this.control('merchant-center', options); }
 
     getGoogleAdsAccounts() {
         return this._runPageTask(async () => {
-            await this._openGoogleAds('https://ads.google.com/nav/selectaccount');
-            const state = await this.getState({ maxElements: 1000 });
+            await this._openService('google-ads', 'https://ads.google.com/nav/selectaccount');
+            const state = await this._getState({ maxElements: 1000 });
             return {
                 ...state,
                 accounts: state.elements.filter(({ label, href }) =>
@@ -410,40 +269,6 @@ class Client extends EventEmitter {
                     (href && new URL(href).hostname === 'ads.google.com' && new URL(href).searchParams.has('euid')))
                     .map(({ id, label, href }) => ({ id, label, url: href, customerId: label.match(/\b\d{3}-\d{3}-\d{4}\b/)?.[0] })),
             };
-        });
-    }
-
-    getGoogleAdsState() {
-        return this._runPageTask(async () => {
-            await this._requireGoogleAds();
-            return { ...(await this.getState()), account: { ...this._googleAdsContext } };
-        });
-    }
-
-    getGoogleAdsReport({ report = 'overview', path, allPages = false, maxPages = 50 } = {}) {
-        return this._runPageTask(async () => {
-            if (typeof allPages !== 'boolean' || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
-                throw new TypeError('allPages must be boolean and maxPages must be an integer between 1 and 500');
-            }
-            if (path !== undefined) {
-                await this._openGoogleAds(path);
-            } else if (report !== 'current') {
-                if (!Object.hasOwn(GoogleAdsReports, report)) throw new TypeError(`Unknown Google Ads report: ${report}`);
-                await this._openGoogleAds(GoogleAdsReports[report]);
-            }
-            return this._collectGoogleAdsReport({ allPages, maxPages });
-        });
-    }
-
-    controlGoogleAds({ label, text, submit = false, exact = true } = {}) {
-        return this._runPageTask(async () => {
-            if (typeof label !== 'string' || !label.trim() || (text !== undefined && typeof text !== 'string') ||
-                typeof submit !== 'boolean' || typeof exact !== 'boolean') {
-                throw new TypeError('label must be a non-empty string; text a string; submit and exact booleans');
-            }
-            await this._requireGoogleAds();
-            await this._googleAdsAction([label], text, { submit, exact });
-            return this._collectGoogleAdsReport();
         });
     }
 
@@ -468,28 +293,28 @@ class Client extends EventEmitter {
             }
         }
         return this._runPageTask(async () => {
-            await this._openGoogleAds(GoogleAdsReports['keyword-planner']);
+            await this._openService('google-ads', GoogleAdsReports['keyword-planner']);
             if (mode === 'forecast') {
-                await this._googleAdsAction(['Get search volume and forecasts', 'Obter volume de pesquisas e previsões']);
-                await this._googleAdsAction(['Enter or paste your keywords', 'Enter keywords', 'Introduza palavras-chave'], keywords.join('\n'), { exact: false });
-                await this._googleAdsAction(['Get started', 'Começar']);
+                await this._actByLabel('google-ads', ['Get search volume and forecasts', 'Obter volume de pesquisas e previsões']);
+                await this._actByLabel('google-ads', ['Enter or paste your keywords', 'Enter keywords', 'Introduza palavras-chave'], keywords.join('\n'), { exact: false });
+                await this._actByLabel('google-ads', ['Get started', 'Começar']);
             } else {
-                await this._googleAdsAction(['Discover new keywords', 'Descobrir novas palavras-chave']);
-                await this._googleAdsAction(keywords ? ['Start with keywords', 'Começar com palavras-chave'] : ['Start with a website', 'Começar com um Website']);
+                await this._actByLabel('google-ads', ['Discover new keywords', 'Descobrir novas palavras-chave']);
+                await this._actByLabel('google-ads', keywords ? ['Start with keywords', 'Começar com palavras-chave'] : ['Start with a website', 'Começar com um Website']);
                 if (keywords) {
-                    await this._googleAdsAction(['Search input', 'Enter products or services', 'Enter keywords', 'Introduza produtos ou serviços'], keywords.join(', '), { exact: false, submit: true });
+                    await this._actByLabel('google-ads', ['Search input', 'Enter products or services', 'Enter keywords', 'Introduza produtos ou serviços'], keywords.join(', '), { exact: false, submit: true });
                 }
                 if (website) {
-                    await this._googleAdsAction(keywords
+                    await this._actByLabel('google-ads', keywords
                         ? ['Enter a site to filter unrelated keywords', 'Enter a domain to use as a filter', 'Enter your site', 'Introduza o seu site']
                         : ['Enter a site to filter unrelated keywords', 'Enter a domain or a page', 'Enter a website', 'Introduza um domínio'], website, { exact: false });
-                    if (!keywords) await this._googleAdsAction(entireSite
+                    if (!keywords) await this._actByLabel('google-ads', entireSite
                         ? ['Use the entire site', 'Utilizar todo o site']
                         : ['Use only this page', 'Utilizar apenas esta página'], undefined, { exact: false, selector: '[role="radio"], input[type="radio"]' });
                 }
-                await this._googleAdsAction(['Get results', 'Obter resultados']);
+                await this._actByLabel('google-ads', ['Get results', 'Obter resultados']);
             }
-            const result = await this._collectGoogleAdsReport({ allPages, maxPages });
+            const result = await this._collectCurrentReport({ allPages, maxPages });
             if (!result.tables.length && !result.charts.length) {
                 throw Object.assign(new Error('Keyword Planner returned no results; inspect /google-ads/state for account requirements or form errors'), { status: 409 });
             }
@@ -497,36 +322,43 @@ class Client extends EventEmitter {
         });
     }
 
-    _googleAdsUrl(target) {
-        if (typeof target !== 'string' || !target.trim()) throw new TypeError('Google Ads path must be a non-empty string');
-        const url = new URL(target, 'https://ads.google.com/aw/');
-        if (url.protocol !== 'https:' || url.hostname !== 'ads.google.com' || url.port || url.username || url.password ||
-            !(url.pathname.startsWith('/aw/') || url.pathname === '/nav/selectaccount')) {
-            throw new TypeError('Google Ads URL must use https://ads.google.com/aw/ or /nav/selectaccount');
+    _serviceUrl(service, target) {
+        if (!Object.hasOwn(Services, service)) throw new TypeError('Unknown service: ' + service);
+        const config = Services[service];
+        target = target === undefined ? config.home || '' : target;
+        if (typeof target !== 'string') throw new TypeError('Service path must be a string');
+        const url = new URL(target, config.url);
+        if (url.protocol !== 'https:' || url.port || url.username || url.password || this._serviceForUrl(url.href) !== service) {
+            throw new TypeError('URL must stay within ' + config.url);
         }
-        if (!['euid', 'ocid', 'authuser'].some((name) => url.searchParams.has(name))) {
-            for (const [name, value] of Object.entries(this._googleAdsContext)) url.searchParams.set(name, value);
+        if (!(config.context || []).some((name) => url.searchParams.has(name))) {
+            for (const [name, value] of Object.entries(this._contexts[service] || {})) url.searchParams.set(name, value);
         }
-        if (!url.searchParams.has('hl')) url.searchParams.set('hl', 'en');
+        if (service === 'google-ads' && !url.searchParams.has('hl')) url.searchParams.set('hl', 'en');
         return url.href;
     }
 
-    async _openGoogleAds(target) {
+    async _openService(service, target) {
         this._requirePage();
+        await this.getStatus();
+        const requested = new URL(this._serviceUrl(service, target));
         if (!this.options.puppeteer.defaultViewport) await this.pupPage.setViewport({ width: 1440, height: 1000 });
-        if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') await this.getStatus();
-        const requested = new URL(this._googleAdsUrl(target));
-        await this.pupPage.goto(requested.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await this._waitForGoogleAds();
-        await this._requireGoogleAds();
+        const response = await this.pupPage.goto(requested.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        if (response?.status() >= 400) {
+            throw Object.assign(new Error(service + ' returned HTTP ' + response.status()), { status: response.status() });
+        }
+        await this._waitForPage();
+        await this._requireService(service);
         const actual = new URL(this.pupPage.url()).pathname.replace(/\/$/, '');
         const expected = requested.pathname.replace(/\/$/, '');
-        if (expected.startsWith('/aw/') && actual !== expected && !actual.startsWith(`${expected}/`)) {
-            throw Object.assign(new Error(`Google Ads redirected ${expected} to ${actual}; this report may not be available for the selected account. Inspect /google-ads/state or /google-ads/navigation.`), { status: 409 });
+        const base = new URL(Services[service].url).pathname.replace(/\/$/, '');
+        if (expected !== base && expected !== '/nav/selectaccount' && actual !== expected && !actual.startsWith(expected + '/')) {
+            throw Object.assign(new Error(service + ' redirected to ' + actual + '; inspect /' + service + '/state for available reports.'), { status: 409 });
         }
+        return this.getStatus();
     }
 
-    async _waitForGoogleAds() {
+    async _waitForPage() {
         await this.pupPage.waitForNetworkIdle({ idleTime: 500, timeout: 3000 }).catch((error) => {
             if (error.name !== 'TimeoutError') throw error;
         });
@@ -536,139 +368,62 @@ class Client extends EventEmitter {
                     getComputedStyle(element).visibility !== 'hidden'), { timeout: 30000 });
     }
 
-    async _requireGoogleAds() {
+    async _requireService(service) {
         this._requirePage();
-        if (!(await this._isServiceAuthenticated('google-ads'))) {
-            throw Object.assign(new Error('Open Google Ads with POST /auth/login {"service":"google-ads"}; the current page is not an authenticated Ads page'), { status: 409 });
+        if (!(await this._isServiceAuthenticated(service))) {
+            throw Object.assign(new Error('An authenticated ' + service + ' page is required; open it with POST /auth/login.'), { status: 409 });
         }
         await this.getStatus();
     }
 
-    async _googleAdsAction(labels, text, { submit = false, exact = true, selector } = {}) {
+    async _actByLabel(service, labels, text, { submit = false, exact = true, selector } = {}) {
         for (const label of labels) {
             const changed = text === undefined
                 ? await this._clickByLabel(label, { exact, unique: true, selector })
                 : await this._typeByLabel(label, text, { submit, exact, unique: true });
             if (!changed) continue;
-            await this._waitForGoogleAds();
+            await this._waitForPage();
             return;
         }
-        throw Object.assign(new Error(`Google Ads control not available: ${labels[0]}. Inspect /google-ads/state for current labels, permissions or setup requirements.`), { status: 409 });
+        throw Object.assign(new Error('Control not available: ' + labels[0] + '. Inspect /' + service + '/state for current labels.'), { status: 409 });
     }
 
-    async _collectGoogleAdsReport(options = {}) {
-        await this._requireGoogleAds();
-        await this.pupPage.evaluate(() => document.querySelector('table, [role="grid"]:has([role="columnheader"]), material-table')?.scrollIntoView({ block: 'start' }));
-        await sleep(400);
-        const initial = await this._extractReport();
-        const report = await this._collectCurrentReport(options);
-        await this._requireGoogleAds();
-        const counts = report.paginations;
-        const singleTable = report.tables.length === 1 && counts.length === 1 && initial.pagination?.from === 1;
-        return {
-            ...report,
-            account: { ...this._googleAdsContext },
-            source: 'google-ads-web-ui',
-            complete: counts.some(({ to, total }) => to < total) ? false
-                : singleTable ? report.tables[0].rows.length === counts[0].total : null,
-            extraction: 'Rendered rows only; virtualized rows, hidden columns and unavailable reports may be missing. null completeness means the UI did not provide enough evidence.',
-        };
-    }
+    getPageSpeedWebReport(target, options) { return this.getPageSpeedReport(target, options); }
 
-    async getPageSpeedReport(target, {
-        strategy = 'mobile',
-        categories = ['performance', 'accessibility', 'best-practices', 'seo'],
-        locale = 'en',
-        apiKey,
-        raw = false,
-    } = {}) {
-        let inspectedUrl;
-        try {
-            inspectedUrl = new URL(target);
-        } catch {
-            throw new TypeError('url must be a valid HTTP or HTTPS URL');
-        }
-        if (!['http:', 'https:'].includes(inspectedUrl.protocol)) {
-            throw new TypeError('url must be a valid HTTP or HTTPS URL');
-        }
-        if (!['mobile', 'desktop'].includes(strategy)) throw new TypeError('strategy must be mobile or desktop');
-        const allowedCategories = new Set(['performance', 'accessibility', 'best-practices', 'seo']);
-        if (!Array.isArray(categories) || !categories.length || categories.some((category) => !allowedCategories.has(category))) {
-            throw new TypeError('category must be performance, accessibility, best-practices or seo');
-        }
-        const endpoint = new URL('https://www.googleapis.com/pagespeedonline/v5/runPagespeed');
-        endpoint.searchParams.set('url', inspectedUrl.href);
-        endpoint.searchParams.set('strategy', strategy);
-        endpoint.searchParams.set('locale', locale);
-        [...new Set(categories)].forEach((category) => endpoint.searchParams.append('category', category));
-        if (apiKey) endpoint.searchParams.set('key', apiKey);
-        const response = await fetch(endpoint);
-        const data = await response.json();
-        if (!response.ok) {
-            const error = new Error(data.error?.message || `PageSpeed API returned HTTP ${response.status}`);
-            error.status = response.status;
-            throw error;
-        }
-        const lighthouse = data.lighthouseResult || {};
-        const audits = Object.entries(lighthouse.audits || {}).map(([id, audit]) => ({
-            id,
-            title: audit.title,
-            description: audit.description,
-            score: audit.score,
-            scoreDisplayMode: audit.scoreDisplayMode,
-            displayValue: audit.displayValue,
-            numericValue: audit.numericValue,
-            numericUnit: audit.numericUnit,
-            metricSavings: audit.metricSavings,
-            warnings: audit.warnings,
-            details: audit.details,
-        }));
-        return {
-            source: 'api',
-            requestedUrl: inspectedUrl.href,
-            finalUrl: lighthouse.finalDisplayedUrl || lighthouse.finalUrl || data.id,
-            strategy,
-            fetchedAt: lighthouse.fetchTime,
-            lighthouseVersion: lighthouse.lighthouseVersion,
-            categories: Object.fromEntries(Object.entries(lighthouse.categories || {}).map(([id, category]) => [id, {
-                title: category.title,
-                score: category.score === null ? null : Math.round(category.score * 100),
-                auditRefs: category.auditRefs,
-            }])),
-            fieldData: data.loadingExperience || null,
-            originFieldData: data.originLoadingExperience || null,
-            environment: lighthouse.environment,
-            timing: lighthouse.timing,
-            configSettings: lighthouse.configSettings,
-            audits,
-            opportunities: audits.filter((audit) =>
-                audit.details?.type === 'opportunity' && audit.score !== null && audit.score < 1),
-            diagnostics: audits.filter((audit) =>
-                ['diagnostic', 'table', 'criticalrequestchain'].includes(audit.details?.type)),
-            ...(raw ? { raw: data } : {}),
-        };
-    }
-
-    getPageSpeedWebReport(target, { strategy = 'mobile' } = {}) {
+    getPageSpeedReport(target, { strategy = 'mobile' } = {}) {
         return this._runPageTask(async () => {
+            this._requirePage();
             let inspectedUrl;
             try {
                 inspectedUrl = new URL(target);
             } catch {
                 throw new TypeError('url must be a valid HTTP or HTTPS URL');
             }
-            if (!['http:', 'https:'].includes(inspectedUrl.protocol)) {
+            if (!['http:', 'https:'].includes(inspectedUrl.protocol) || inspectedUrl.username || inspectedUrl.password) {
                 throw new TypeError('url must be a valid HTTP or HTTPS URL');
             }
             if (!['mobile', 'desktop'].includes(strategy)) throw new TypeError('strategy must be mobile or desktop');
             const pageSpeedUrl = new URL('https://pagespeed.web.dev/analysis');
             pageSpeedUrl.searchParams.set('url', inspectedUrl.href);
             pageSpeedUrl.searchParams.set('form_factor', strategy);
+            pageSpeedUrl.searchParams.set('hl', 'en');
             await this.pupPage.goto(pageSpeedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await this.pupPage.waitForFunction(() => {
-                const text = document.body?.innerText || '';
-                return /First Contentful Paint/i.test(text) && /Largest Contentful Paint/i.test(text);
-            }, { timeout: 120000 });
+            const ready = () => {
+                const lines = (document.body?.innerText || '').split('\n').map((line) => line.trim()).filter(Boolean);
+                return ['First Contentful Paint', 'Largest Contentful Paint'].every((metric) =>
+                    lines.some((line, index) => line.toLowerCase() === metric.toLowerCase() &&
+                        /^[<>]?\d+(?:[.,]\d+)?\s*(?:ms|s)$/i.test(lines[index + 1])));
+            };
+            try {
+                await this.pupPage.waitForFunction(ready, { timeout: 90000 });
+            } catch (error) {
+                if (error.name !== 'TimeoutError') throw error;
+                await this.pupPage.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+                await this.pupPage.waitForFunction(ready, { timeout: 60000 }).catch((error) => {
+                    if (error.name !== 'TimeoutError') throw error;
+                    throw Object.assign(new Error('PageSpeed has not completed the analysis; inspect ' + this.pupPage.url()), { status: 504 });
+                });
+            }
             await this.pupPage.evaluate(() => {
                 [...document.querySelectorAll('button')]
                     .filter((button) => /^(?:Show|Mostrar)$/i.test(button.innerText.trim()))
@@ -684,7 +439,8 @@ class Client extends EventEmitter {
                     return index > 0 && /^\d+$/.test(lines[index - 1]) ? Number(lines[index - 1]) : null;
                 };
                 const metric = (...names) => {
-                    const index = lines.findIndex((line) => names.some((name) => line.toLowerCase() === name));
+                    const index = lines.findIndex((line, index) => names.some((name) => line.toLowerCase() === name) &&
+                        /^[<>]?\d+(?:[.,]\d+)?(?:\s*(?:ms|s))?$/i.test(lines[index + 1]));
                     return index >= 0 ? lines[index + 1] || null : null;
                 };
                 const savings = lines.filter((line) => /(?:estimated savings|poupança estimada)/i.test(line));
@@ -700,7 +456,7 @@ class Client extends EventEmitter {
                     !/^(?:PageSpeed Insights|Performance|Desempenho|Accessibility|Acessibilidade|Best practices|Práticas recomendadas|SEO)$/i.test(heading));
                 const audits = [...new Set([...auditTitles, ...savings, ...diagnostics])];
                 return {
-                    source: 'web-ui-fallback',
+                    source: 'pagespeed-web-ui',
                     requestedUrl,
                     reportUrl: location.href,
                     strategy,
@@ -733,33 +489,8 @@ class Client extends EventEmitter {
         });
     }
 
-    getSearchConsoleReports(property) {
-        const resource = this._searchConsoleProperty(property);
-        return Object.entries(SearchConsoleReports).map(([name, reportPath]) => ({
-            name,
-            url: this._searchConsoleUrl(reportPath, resource),
-        }));
-    }
-
-    getSearchConsoleReport({
-        report = 'overview',
-        path: reportPath,
-        property,
-        tab,
-        allPages = false,
-        maxPages = 50,
-    } = {}) {
-        return this._runPageTask(async () => {
-            const path = reportPath === undefined ? SearchConsoleReports[report] : reportPath;
-            if (path === undefined) throw new TypeError(`Unknown Search Console report: ${report}`);
-            await this._openSearchConsole(path, property);
-            if (tab && !(await this._clickByLabel(tab, { selector: '[role="tab"]' }))) {
-                throw new TypeError(`Unknown or unavailable report tab: ${tab}`);
-            }
-            if (tab) await sleep(1000);
-            return this._collectCurrentReport({ allPages, maxPages });
-        });
-    }
+    getSearchConsoleReports(property) { return this.getReports('search-console', { property }); }
+    getSearchConsoleReport(options) { return this.getReport('search-console', options); }
 
     getIndexingPages({
         property,
@@ -974,12 +705,13 @@ class Client extends EventEmitter {
 
     async getSearchConsoleSummary({ property, period = '28-days' } = {}) {
         const performance = await this.getPerformance({ property, period, dimension: 'queries' });
+        property = performance.property;
         const indexing = await this.getSearchConsoleReport({ report: 'indexing', property });
         const sitemaps = await this.getSearchConsoleReport({ report: 'sitemaps', property });
         const coreWebVitals = await this.getSearchConsoleReport({ report: 'core-web-vitals', property });
         const manualActions = await this.getSearchConsoleReport({ report: 'manual-actions', property });
         const securityIssues = await this.getSearchConsoleReport({ report: 'security-issues', property });
-        const notifications = await this.getNotifications();
+        const notifications = await this.getNotifications({ property });
         return {
             generatedAt: new Date().toISOString(),
             property: performance.property,
@@ -1002,11 +734,13 @@ class Client extends EventEmitter {
         };
     }
 
-    getNotifications() {
+    getNotifications({ property } = {}) {
         return this._runPageTask(async () => {
             this._requirePage();
-            if (!this.pupPage.url().startsWith('https://search.google.com/search-console')) {
-                await this._openSearchConsole(SearchConsoleReports.overview);
+            const resource = this._searchConsoleProperty(property);
+            if (this._serviceForUrl(this.pupPage.url()) !== 'search-console' ||
+                new URL(this.pupPage.url()).searchParams.get('resource_id') !== resource) {
+                await this._openSearchConsole(SearchConsoleReports.overview, resource);
             }
             const alreadyOpen = await this.pupPage.evaluate(() => /\d+ unread out of \d+/i.test(document.body?.innerText || ''));
             if (!alreadyOpen && !(await this._clickByLabel('Messages'))) {
@@ -1086,17 +820,7 @@ class Client extends EventEmitter {
         });
     }
 
-    controlSearchConsole({ label, text, submit = false, exact = true } = {}) {
-        return this._runPageTask(async () => {
-            if (!label) throw new TypeError('label is required');
-            const changed = text === undefined
-                ? await this._clickByLabel(label, { exact })
-                : await this._typeByLabel(label, String(text), { submit, exact });
-            if (!changed) throw new TypeError(`No visible control matches label: ${label}`);
-            await sleep(500);
-            return this._extractReport();
-        });
-    }
+    controlSearchConsole(options) { return this.control('search-console', options); }
 
     click(elementId) {
         return this._runPageTask(async () => {
@@ -1116,10 +840,10 @@ class Client extends EventEmitter {
 
     type(elementId, text, { submit = false } = {}) {
         return this._runPageTask(async () => {
-            if (typeof text !== 'string') throw new TypeError('text must be a string');
+            if (typeof text !== 'string' || typeof submit !== 'boolean') throw new TypeError('text must be a string; submit a boolean');
             const element = await this._element(elementId);
             const editable = await element.evaluate((node) =>
-                ['INPUT', 'TEXTAREA'].includes(node.tagName) || node.isContentEditable,
+                (node.type !== 'password' && ['INPUT', 'TEXTAREA'].includes(node.tagName)) || node.isContentEditable,
             );
             if (!editable) throw new TypeError(`Element ${elementId} is not editable`);
             await element.click({ clickCount: 3 });
@@ -1150,12 +874,16 @@ class Client extends EventEmitter {
         });
     }
 
-    async screenshot({ fullPage = false } = {}) {
-        this._requirePage();
-        return Buffer.from(await this.pupPage.screenshot({ type: 'png', fullPage }));
+    screenshot({ fullPage = false } = {}) {
+        return this._runPageTask(async () => {
+            this._requirePage();
+            if (typeof fullPage !== 'boolean') throw new TypeError('fullPage must be a boolean');
+            return Buffer.from(await this.pupPage.screenshot({ type: 'png', fullPage }));
+        });
     }
 
     async destroy() {
+        await this._pageQueue;
         this._destroying = true;
         const browser = this.pupBrowser;
         const browserProcess = this._browserProcess;
@@ -1168,9 +896,11 @@ class Client extends EventEmitter {
     async resetSession() {
         await this.destroy();
         await this.authStrategy.logout();
-        this._googleAdsContext = {};
+        this._contexts = {};
+        this._searchConsoleResource = this.options.searchConsoleProperty || null;
     }
 
+    // ponytail: one shared tab; use per-service pages if parallel workflows become necessary.
     _runPageTask(task) {
         const result = this._pageQueue.then(task, task);
         this._pageQueue = result.catch(() => {});
@@ -1211,7 +941,7 @@ class Client extends EventEmitter {
             throw new Error('Visible Google login requires a separate userDataDir');
         }
         this._browserProcess = spawn(
-            await Promise.resolve(systemChrome),
+            systemChrome,
             [
                 ...(options.args || []).filter((argument) =>
                     !argument.startsWith('--remote-debugging-') &&
@@ -1260,10 +990,6 @@ class Client extends EventEmitter {
         });
     }
 
-    async _restartHeadless() {
-        await this._restartBrowser({ ...this.options.puppeteer, headless: true });
-    }
-
     async _restartBrowser(options) {
         this._destroying = true;
         const browser = this.pupBrowser;
@@ -1293,7 +1019,7 @@ class Client extends EventEmitter {
     async _isAuthenticated() {
         if (!this.pupBrowser) return false;
         const cookies = await this.pupBrowser.defaultBrowserContext().cookies().catch(() => []);
-        return cookies.some(({ name }) => [
+        return cookies.some(({ name, domain }) => /(^|\.)google\.com$/.test(domain) && [
             'SID',
             'SAPISID',
             '__Secure-1PSID',
@@ -1301,11 +1027,11 @@ class Client extends EventEmitter {
         ].includes(name));
     }
 
-    async _waitForAuthentication(service = 'search-console', loginUrl = LoginURL) {
+    async _waitForAuthentication(service, loginUrl) {
         const started = Date.now();
         while (this.pupBrowser?.connected) {
             if (await this._isAuthenticated() && !this.pupPage.url().includes('accounts.google.com')) {
-                await this.pupPage.goto(Services[service].url, {
+                await this.pupPage.goto(this._serviceUrl(service), {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000,
                 });
@@ -1323,14 +1049,7 @@ class Client extends EventEmitter {
 
     async _openSearchConsole(reportPath, property) {
         const resource = this._searchConsoleProperty(property);
-        await this.pupPage.goto(this._searchConsoleUrl(reportPath, resource), {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000,
-        });
-        await sleep(1200);
-        if (!(await this._isSearchConsoleAuthenticated())) {
-            throw new Error('An authenticated Search Console session is required');
-        }
+        await this._openService('search-console', this._searchConsoleUrl(reportPath, resource));
         return resource;
     }
 
@@ -1349,158 +1068,20 @@ class Client extends EventEmitter {
     }
 
     _searchConsoleUrl(reportPath, property) {
-        const url = new URL(String(reportPath || '').replace(/^\/+/, ''), 'https://search.google.com/search-console/');
-        if (url.hostname !== 'search.google.com' || !url.pathname.startsWith('/search-console')) {
-            throw new TypeError('Search Console report path is invalid');
-        }
+        const url = new URL(this._serviceUrl('search-console', String(reportPath || '').replace(/^\/+/, '')));
         url.searchParams.set('resource_id', property);
         return url.href;
     }
 
     async _extractReport() {
         this._requirePage();
-        const report = await this.pupPage.evaluate(() => {
-            const clean = (value, limit = 5000) => String(value || '')
-                .replace(/\u00a0/g, ' ')
-                .replace(/[ \t]+/g, ' ')
-                .replace(/\n{3,}/g, '\n\n')
-                .trim()
-                .slice(0, limit);
-            const visible = (element) => {
-                const style = getComputedStyle(element);
-                const rect = element.getBoundingClientRect();
-                return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-            };
-            const labelFor = (element) => {
-                const explicit = element.id
-                    ? document.querySelector(`label[for="${CSS.escape(element.id)}"]`)?.innerText
-                    : '';
-                return clean(
-                    element.getAttribute('aria-label') ||
-                    explicit ||
-                    element.getAttribute('placeholder') ||
-                    element.innerText ||
-                    element.textContent,
-                );
-            };
-            const bodyText = clean(document.body?.innerText, 100000);
-            const tableSelector = 'table, [role="table"], [role="grid"], material-table';
-            let roots = [...document.querySelectorAll(tableSelector)]
-                .filter(visible)
-                .filter((root) => !root.matches('material-chips'))
-                .filter((root) => location.hostname !== 'ads.google.com' || !root.matches('[role="grid"]') || root.querySelector('[role="columnheader"]'))
-                .filter((root) => !root.parentElement?.closest(tableSelector));
-            if (!roots.length && document.querySelectorAll('[role="row"]').length > 1 &&
-                (location.hostname !== 'ads.google.com' || document.querySelector('[role="columnheader"]'))) roots = [document.body];
-            const tables = roots.map((root) => {
-                const rowElements = root.matches('table')
-                    ? [...root.querySelectorAll('tr')]
-                    : [...root.querySelectorAll('[role="row"], material-row, material-header-row')];
-                const headerRow = rowElements.find((row) => row.querySelector('th, [role="columnheader"], material-header-cell'));
-                const rows = rowElements.filter((row) => visible(row) && row !== headerRow).map((row) => {
-                    let cells = [...row.querySelectorAll([
-                        ':scope > th',
-                        ':scope > td',
-                        ':scope > [role="columnheader"]',
-                        ':scope > [role="rowheader"]',
-                        ':scope > [role="gridcell"]',
-                        ':scope > [role="cell"]',
-                        ':scope > material-cell',
-                    ].join(','))].filter(visible);
-                    if (!cells.length) {
-                        cells = [...row.children].filter((child) => visible(child) && clean(child.innerText));
-                    }
-                    return cells.map((cell) => clean(cell.innerText || cell.textContent));
-                }).filter((row) => row.some(Boolean));
-                const headers = headerRow
-                    ? [...headerRow.querySelectorAll('th, [role="columnheader"], material-header-cell, :scope > [role="gridcell"]')]
-                        .map((cell) => clean(cell.getAttribute('aria-label') || cell.innerText))
-                    : [];
-                return {
-                    name: clean(root.getAttribute('aria-label') || root.querySelector('caption')?.innerText),
-                    headers,
-                    rows,
-                };
-            }).filter(({ rows }) => rows.length);
-            const controls = [...document.querySelectorAll([
-                'button',
-                'input',
-                'textarea',
-                'select',
-                '[role="button"]',
-                '[role="radio"]',
-                '[role="tab"]',
-                '[role="combobox"]',
-                '[role="menuitem"]',
-                '[role="checkbox"]',
-                '[role="textbox"]',
-            ].join(','))]
-                .filter(visible)
-                .map((element) => ({
-                    label: labelFor(element),
-                    role: element.getAttribute('role') || element.tagName.toLowerCase(),
-                    value: 'value' in element && element.type !== 'password' ? clean(element.value) : undefined,
-                    selected: element.getAttribute('aria-selected') === 'true' ||
-                        element.getAttribute('aria-checked') === 'true' ||
-                        element.getAttribute('aria-pressed') === 'true' || Boolean(element.checked),
-                    disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'),
-                }))
-                .filter(({ label }) => label)
-                .slice(0, 1000);
-            const metrics = controls.flatMap(({ label }) => {
-                const lines = label.split('\n').map((line) => clean(line)).filter(Boolean);
-                const valueIndex = lines.findIndex((line, index) => index > 0 &&
-                    /^(?:[<>]?\d[\d.,]*[KMB]?%?|No data)$/i.test(line));
-                if (valueIndex < 1) return [];
-                return [{
-                    label: lines[valueIndex - 1],
-                    value: lines[valueIndex],
-                    details: lines.slice(valueIndex + 1),
-                }];
-            }).filter(({ label }, index, values) =>
-                !values.slice(0, index).some((metric) => metric.label === label));
-            const chartDescriptions = [...bodyText.matchAll(/Chart,[^\n]+/gi)].map(([text]) => clean(text));
-            const charts = [...document.querySelectorAll('canvas, svg, [role="img"]')]
-                .filter(visible)
-                .map((element) => ({
-                    type: element.tagName.toLowerCase(),
-                    description: clean(element.getAttribute('aria-label') || element.getAttribute('title')),
-                    labels: element.matches('svg')
-                        ? [...element.querySelectorAll('text')].map((text) => clean(text.textContent)).filter(Boolean).slice(0, 500)
-                        : [],
-                }))
-                .filter(({ description, labels }) => description || labels.length);
-            chartDescriptions.forEach((description) => {
-                if (!charts.some((chart) => chart.description === description)) charts.push({ type: 'accessible-text', description, labels: [] });
-            });
-            const paginations = [...bodyText.matchAll(/(\d[\d,]*)\s*[-–]\s*(\d[\d,]*)\s+(?:of|de)\s+(\d[\d,]*)/gi)]
-                .map((match) => ({
-                    from: Number(match[1].replace(/,/g, '')),
-                    to: Number(match[2].replace(/,/g, '')),
-                    total: Number(match[3].replace(/,/g, '')),
-                }));
-            return {
-                updated: bodyText.match(/Last update(?:d)?:\s*([^\n]+)/i)?.[1] || null,
-                headings: [...document.querySelectorAll('h1, h2, h3, [role="heading"]')]
-                    .filter(visible).map((element) => clean(element.innerText)).filter(Boolean).slice(0, 100),
-                metrics,
-                controls,
-                tables,
-                charts,
-                pagination: paginations[0] || null,
-                paginations,
-                links: [...document.querySelectorAll('a[href]')].filter(visible).map((link) => ({
-                    label: labelFor(link),
-                    url: link.href,
-                })).filter(({ label }) => label).slice(0, 500),
-                rawText: bodyText,
-            };
-        });
+        const status = await this.getStatus();
         return {
-            ...(await this.getStatus()),
-            ...(this._serviceForUrl(this.pupPage.url()) === 'search-console'
-                ? { property: this._searchConsoleProperty() } : {}),
-            ...report,
+            ...status,
+            ...(status.service === 'search-console' && this._searchConsoleResource
+                ? { property: this._searchConsoleResource } : {}),
+            source: (status.service || 'browser') + '-web-ui',
+            ...(await this.pupPage.evaluate(snapshot, { report: true, maxText: 100000, maxElements: 1000 })),
         };
     }
 
@@ -1509,7 +1090,14 @@ class Client extends EventEmitter {
         if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 500) {
             throw new TypeError('maxPages must be an integer between 1 and 500');
         }
+        const service = this._serviceForUrl(this.pupPage.url());
+        await this._requireService(service);
+        if (service === 'google-ads') {
+            await this.pupPage.evaluate(() => document.querySelector('table, [role="grid"]:has([role="columnheader"]), material-table')?.scrollIntoView({ block: 'start' }));
+            await sleep(400);
+        }
         const report = await this._extractReport();
+        const fromFirstPage = report.pagination?.from === 1;
         let pagesRead = 1;
         let signature = JSON.stringify([report.tables, report.paginations]);
         const nextPage = async () => {
@@ -1521,8 +1109,8 @@ class Client extends EventEmitter {
             return false;
         };
         while (allPages && pagesRead < maxPages && await nextPage()) {
-            if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') await this._waitForGoogleAds();
-            else await sleep(800);
+            await this._waitForPage();
+            await this._requireService(service);
             let page = await this._extractReport();
             for (let attempt = 0; attempt < 5 && JSON.stringify([page.tables, page.paginations]) === signature; attempt++) {
                 await sleep(400);
@@ -1535,7 +1123,10 @@ class Client extends EventEmitter {
                 if (!report.tables[index]) return report.tables.push(table);
                 const existing = new Set(report.tables[index].rows.map((row) => JSON.stringify(row)));
                 table.rows.forEach((row) => {
-                    if (!existing.has(JSON.stringify(row))) report.tables[index].rows.push(row);
+                    const key = JSON.stringify(row);
+                    if (existing.has(key)) return;
+                    existing.add(key);
+                    report.tables[index].rows.push(row);
                 });
             });
             report.pagination = page.pagination;
@@ -1543,6 +1134,10 @@ class Client extends EventEmitter {
             pagesRead++;
         }
         report.pagesRead = pagesRead;
+        report.complete = report.paginations.some(({ to, total }) => to < total) ? false
+            : fromFirstPage && report.tables.length === 1 && report.paginations.length === 1
+                ? report.tables[0].rows.length === report.paginations[0].total : null;
+        report.extraction = 'Rendered rows only; hidden or virtualized rows may be missing. null completeness means the UI supplied insufficient evidence.';
         return report;
     }
 
@@ -1550,7 +1145,7 @@ class Client extends EventEmitter {
         for (const label of ['Next page', 'Go to next page', 'Go to the next page', 'Página seguinte', 'Ir para a página seguinte']) {
             if (await this._clickByLabel(label)) return true;
         }
-        if (this._serviceForUrl(this.pupPage.url()) === 'google-ads') return false;
+        if (this._serviceForUrl(this.pupPage.url()) !== 'search-console') return false;
         return this.pupPage.evaluate(() => {
             const visible = (element) => {
                 const style = getComputedStyle(element);
@@ -1759,17 +1354,10 @@ class Client extends EventEmitter {
     }
 
     async _isServiceAuthenticated(service) {
-        if (service === 'merchant-center') {
-            if (!this.pupPage || !(await this._isAuthenticated())) return false;
-            let url;
-            try { url = new URL(this.pupPage.url()); } catch { return false; }
-            return url.hostname === 'merchants.google.com';
-        }
-        if (service !== 'google-ads') return this._isSearchConsoleAuthenticated();
-        if (!this.pupPage || !(await this._isAuthenticated())) return false;
-        const url = new URL(this.pupPage.url());
-        return url.hostname === 'ads.google.com' &&
-            (url.pathname.startsWith('/aw/') || url.pathname === '/nav/selectaccount');
+        if (!Object.hasOwn(Services, service) || !this.pupPage || this._serviceForUrl(this.pupPage.url()) !== service) return false;
+        if (!Services[service].login) return true;
+        if (service === 'search-console') return this._isSearchConsoleAuthenticated();
+        return this._isAuthenticated();
     }
 
     async _isSearchConsoleAuthenticated() {
@@ -1818,7 +1406,7 @@ class Client extends EventEmitter {
     async _element(elementId) {
         this._requirePage();
         if (!/^e\d+$/.test(String(elementId))) throw new TypeError('Invalid element id');
-        return await this.pupPage.$(`[data-google-seo-id="${elementId}"]`) ||
+        return await this.pupPage.$(`[data-gtm-id="${elementId}"]`) ||
             Promise.reject(this._staleElement(elementId));
     }
 
@@ -1828,14 +1416,19 @@ class Client extends EventEmitter {
         return error;
     }
 
-    _serviceForUrl(url) {
-        if (new URL(url).hostname === 'ads.google.com') return 'google-ads';
-        return Object.entries(Services)
-            .find(([, service]) => {
-                const prefix = service.url.replace(/\/$/, '');
-                return url === prefix || url.startsWith(`${prefix}/`) || url.startsWith(`${prefix}?`);
-            })?.[0] || null;
+    _serviceForUrl(target) {
+        let url;
+        try { url = new URL(target); } catch { return null; }
+        if (url.protocol !== 'https:' || url.port || url.username || url.password) return null;
+        return Object.entries(Services).find(([, config]) => {
+            const base = new URL(config.url);
+            return url.hostname === base.hostname && (config.paths || [base.pathname]).some((path) => {
+                const prefix = path.replace(/\/$/, '');
+                return url.pathname === prefix || url.pathname.startsWith(prefix + '/');
+            });
+        })?.[0] || null;
     }
+
 }
 
 module.exports = Client;

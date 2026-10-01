@@ -2,11 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const BaseAuthStrategy = require('./BaseAuthStrategy');
 
-class LocalAuth extends BaseAuthStrategy {
+class LocalAuth {
     constructor({ clientId, dataPath = './.google-seo-auth' } = {}) {
-        super();
         if (clientId && !/^[-_\w]+$/i.test(clientId)) {
             throw new Error('clientId accepts only letters, numbers, underscores and hyphens');
         }
@@ -14,6 +12,10 @@ class LocalAuth extends BaseAuthStrategy {
             path.resolve(dataPath),
             clientId ? `session-${clientId}` : 'session',
         );
+    }
+
+    setup(client) {
+        this.client = client;
     }
 
     async beforeBrowserInitialized() {

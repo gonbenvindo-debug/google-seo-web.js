@@ -2,32 +2,7 @@
 
 const { timingSafeEqual } = require('crypto');
 const http = require('http');
-const GoogleApiClient = require('./src/google-api');
-const { Services, GoogleAdsReports, MerchantCenterReports } = require('./src/Constants');
-
-const jsonRoutes = new Set([
-    'POST /auth/login',
-    'POST /auth/logout',
-    'POST /browser/start',
-    'POST /browser/open',
-    'POST /browser/click',
-    'POST /browser/type',
-    'POST /browser/back',
-    'POST /browser/reload',
-    'POST /browser/stop',
-    'POST /search-console/control',
-    'POST /search-console/filter',
-    'POST /search-console/sitemaps',
-    'POST /search-console/url-inspection',
-    'POST /google-ads/account',
-    'POST /google-ads/control',
-    'POST /google-ads/filter',
-    'POST /google-ads/keyword-ideas',
-    'POST /google-ads/keyword-forecast',
-    'POST /merchant-center/navigate',
-    'POST /merchant-center/control',
-    'POST /merchant-center/filter',
-]);
+const { Services } = require('./src/Constants');
 
 function hasValidKey(authorization, apiKey) {
     if (!apiKey) return true;
@@ -64,10 +39,11 @@ function booleanParam(parameters, name, fallback = false) {
     throw new TypeError(`${name} must be true or false`);
 }
 
-function integerParam(parameters, name, fallback) {
-    if (!parameters.has(name)) return fallback;
-    const value = Number(parameters.get(name));
-    if (!Number.isInteger(value)) throw new TypeError(`${name} must be an integer`);
+function integerParam(parameters, name, fallback, min = 0, max = Infinity) {
+    const value = parameters.has(name) ? Number(parameters.get(name)) : fallback;
+    if (!Number.isInteger(value) || value < min || value > max) {
+        throw new TypeError(name + ' must be an integer between ' + min + ' and ' + max);
+    }
     return value;
 }
 
@@ -87,16 +63,14 @@ function toCsv(report, tableIndex = 0) {
         .join('\r\n');
 }
 
-function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient() } = {}) {
+function createApiServer(client, { apiKey } = {}) {
     let starting;
     const start = async (target) => {
-        if (starting) {
-            await starting;
-            if (target) await client.open(target);
-        } else if (!client.pupBrowser) {
+        if (starting) await starting;
+        if (!client.pupBrowser) {
             starting = client.initialize(target).finally(() => { starting = null; });
             await starting;
-        } else if (client.pupBrowser && target) {
+        } else if (target) {
             await client.open(target);
         }
         return client.getStatus();
@@ -136,23 +110,26 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
             }
             const url = new URL(request.url, 'http://localhost');
             const route = `${request.method} ${url.pathname}`;
-            const directApi = /^\/api\/(?:merchant(?:\/|$)|google-ads(?:\/|$)|adsense(?:\/|$))/.test(url.pathname);
-            const needsBody = jsonRoutes.has(route) || (directApi && request.method !== 'GET');
+            const needsBody = request.method === 'POST';
             const body = needsBody ? await readJson(request) : {};
             if (needsBody && (!body || typeof body !== 'object' || Array.isArray(body))) {
                 throw new TypeError('JSON body must be an object');
             }
-            const ensureSearchConsole = async () => {
+            const ensureBrowser = async (service = 'search-console') => {
                 if (starting) await starting;
-                if (!client.pupBrowser) await start('search-console');
+                if (!client.pupBrowser) await start(service);
             };
             const reportOptions = () => ({
                 report: url.searchParams.get('report') || 'overview',
                 path: url.searchParams.get('path') || undefined,
                 property: url.searchParams.get('property') || undefined,
                 tab: url.searchParams.get('tab') || undefined,
-                allPages: booleanParam(url.searchParams, 'allPages'),
-                maxPages: integerParam(url.searchParams, 'maxPages', 50),
+                allPages: booleanParam(url.searchParams, 'allPages', route.endsWith('.csv')),
+                maxPages: integerParam(url.searchParams, 'maxPages', 50, 1, 500),
+            });
+            const stateOptions = () => ({
+                maxText: integerParam(url.searchParams, 'maxText', 30000, 1000, 100000),
+                maxElements: integerParam(url.searchParams, 'maxElements', 250, 1, 1000),
             });
             const performanceOptions = () => ({
                 property: url.searchParams.get('property') || undefined,
@@ -168,8 +145,8 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                     page: url.searchParams.get('pageOperator') || undefined,
                 },
                 allMetrics: booleanParam(url.searchParams, 'allMetrics', true),
-                allPages: booleanParam(url.searchParams, 'allPages'),
-                maxPages: integerParam(url.searchParams, 'maxPages', 50),
+                allPages: booleanParam(url.searchParams, 'allPages', route.endsWith('.csv')),
+                maxPages: integerParam(url.searchParams, 'maxPages', 50, 1, 500),
             });
             const indexingPagesOptions = () => ({
                 property: url.searchParams.get('property') || undefined,
@@ -178,62 +155,35 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                 urlContains: url.searchParams.get('urlContains') || undefined,
                 language: url.searchParams.get('language') || undefined,
                 crawled: url.searchParams.has('crawled') ? booleanParam(url.searchParams, 'crawled') : undefined,
-                maxPages: integerParam(url.searchParams, 'maxPages', 500),
+                maxPages: integerParam(url.searchParams, 'maxPages', 500, 1, 500),
             });
-            const apiQuery = () => {
-                const query = {};
-                for (const key of new Set(url.searchParams.keys())) {
-                    const values = url.searchParams.getAll(key);
-                    query[key] = values.length > 1 ? values : values[0];
+            const sendReport = (report, filename) => {
+                if (!route.endsWith('.csv')) return sendJson(report.complete === false ? 206 : 200, report);
+                if (report.complete !== true && !booleanParam(url.searchParams, 'allowPartial')) {
+                    return sendJson(409, { error: 'Cannot verify a complete export. Inspect the JSON report or use allowPartial=true for rendered rows.' });
                 }
-                return query;
+                return sendCsv(toCsv(report, integerParam(url.searchParams, 'table', 0)), filename);
             };
-
-            if (directApi && request.method !== 'OPTIONS') {
-                if (url.pathname === '/api/merchant' || url.pathname.startsWith('/api/merchant/')) {
-                    const path = url.pathname.slice('/api/merchant'.length).replace(/^\//, '');
-                    if (!path) throw new TypeError('Merchant API path is required after /api/merchant/');
-                    const result = await googleApiClient.requestMerchant({ path, method: request.method, query: apiQuery(), body: needsBody ? body : undefined });
-                    return sendJson(result.status, result.data);
-                }
-                if (url.pathname === '/api/adsense' || url.pathname.startsWith('/api/adsense/')) {
-                    const path = url.pathname.slice('/api/adsense'.length).replace(/^\//, '');
-                    if (!path) throw new TypeError('AdSense API path is required after /api/adsense/');
-                    const result = await googleApiClient.requestAdSense({ path, method: request.method, query: apiQuery(), body: needsBody ? body : undefined });
-                    return sendJson(result.status, result.data);
-                }
-                if (url.pathname === '/api/google-ads/customers:listAccessibleCustomers') {
-                    const result = await googleApiClient.requestGoogleAds({
-                        path: 'customers:listAccessibleCustomers',
-                        method: request.method,
-                        query: apiQuery(),
-                    });
-                    return sendJson(result.status, result.data);
-                }
-                const adsApiPath = url.pathname.match(/^\/api\/google-ads\/(\d{6,20})(?:\/(.+)|(:[A-Za-z][A-Za-z0-9]*))$/);
-                if (!adsApiPath) throw new TypeError('Google Ads API route must include a customer ID and a search, customer action or resource action');
-                const query = apiQuery();
-                const loginCustomerId = query.loginCustomerId;
-                delete query.loginCustomerId;
-                const result = await googleApiClient.requestGoogleAds({
-                    customerId: adsApiPath[1],
-                    path: adsApiPath[2] || adsApiPath[3],
-                    method: request.method,
-                    query,
-                    body: needsBody ? body : undefined,
-                    loginCustomerId,
-                });
-                return sendJson(result.status, result.data);
+            const serviceRoute = url.pathname.match(/^\/([^/]+)\/([^/]+?)(\.csv)?$/);
+            const service = serviceRoute?.[1];
+            const action = serviceRoute?.[2];
+            const config = Object.hasOwn(Services, service) ? Services[service] : null;
+            if (request.method === 'GET' && config && action === 'reports' && !serviceRoute[3]) {
+                return sendJson(200, client.getReports(service, { property: url.searchParams.get('property') || undefined }));
             }
 
             if (route === 'GET /health' || route === 'GET /auth/status') {
                 return sendJson(200, await client.getStatus());
             }
             if (route === 'GET /services') return sendJson(200, Services);
-            if (route === 'GET /google-ads/reports') return sendJson(200, client.getGoogleAdsReports());
-            if (route === 'GET /merchant-center/reports') return sendJson(200, client.getMerchantCenterReports());
             if (route === 'POST /auth/login' || route === 'POST /browser/start') {
-                return sendJson(200, await start(body.target || body.service || 'search-console'));
+                const target = body.target || body.service || 'search-console';
+                client.resolveTarget(target);
+                if (route === 'POST /auth/login') {
+                    if (starting) await starting;
+                    await client.destroy();
+                }
+                return sendJson(200, await start(target));
             }
             if (route === 'POST /auth/logout') {
                 await client.resetSession();
@@ -244,14 +194,7 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                 return sendJson(200, await start(body.target));
             }
             if (route === 'GET /browser/state') {
-                return sendJson(200, await client.getState({
-                    maxText: url.searchParams.has('maxText')
-                        ? Number(url.searchParams.get('maxText'))
-                        : undefined,
-                    maxElements: url.searchParams.has('maxElements')
-                        ? Number(url.searchParams.get('maxElements'))
-                        : undefined,
-                }));
+                return sendJson(200, await client.getState(stateOptions()));
             }
             if (route === 'POST /browser/click') {
                 if (!body.id) throw new TypeError('id is required');
@@ -259,76 +202,48 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
             }
             if (route === 'POST /browser/type') {
                 if (!body.id) throw new TypeError('id is required');
-                return sendJson(200, await client.type(body.id, body.text, { submit: Boolean(body.submit) }));
+                return sendJson(200, await client.type(body.id, body.text, { submit: body.submit ?? false }));
             }
             if (route === 'POST /browser/back') return sendJson(200, await client.back());
             if (route === 'POST /browser/reload') return sendJson(200, await client.reload());
             if (route === 'GET /browser/screenshot') {
-                return sendPng(await client.screenshot({ fullPage: url.searchParams.get('fullPage') === 'true' }));
+                return sendPng(await client.screenshot({ fullPage: booleanParam(url.searchParams, 'fullPage') }));
             }
             if (route === 'POST /browser/stop') {
                 await client.destroy();
                 return sendJson(200, await client.getStatus());
             }
-            if (route === 'GET /search-console/reports' || route === 'GET /search-console/navigation') {
-                await ensureSearchConsole();
-                return sendJson(200, client.getSearchConsoleReports(url.searchParams.get('property') || undefined));
-            }
-            if (route === 'GET /search-console/report') {
-                await ensureSearchConsole();
-                return sendJson(200, await client.getSearchConsoleReport(reportOptions()));
-            }
-            if (route === 'GET /search-console/report.csv') {
-                await ensureSearchConsole();
-                const options = reportOptions();
-                options.allPages = booleanParam(url.searchParams, 'allPages', true);
-                const report = await client.getSearchConsoleReport(options);
-                return sendCsv(
-                    toCsv(report, integerParam(url.searchParams, 'table', 0)),
-                    `${options.report}.csv`,
-                );
-            }
-            if (route === 'GET /search-console/performance' || route === 'GET /search-console/graph') {
-                await ensureSearchConsole();
+            if (['GET /search-console/performance', 'GET /search-console/performance.csv', 'GET /search-console/graph'].includes(route)) {
+                await ensureBrowser();
                 const options = performanceOptions();
                 if (route.endsWith('/graph')) options.dimension = 'days';
-                return sendJson(200, await client.getPerformance(options));
-            }
-            if (route === 'GET /search-console/performance.csv') {
-                await ensureSearchConsole();
-                const options = performanceOptions();
-                options.allPages = booleanParam(url.searchParams, 'allPages', true);
-                const report = await client.getPerformance(options);
-                return sendCsv(
-                    toCsv(report, integerParam(url.searchParams, 'table', 0)),
-                    `performance-${options.dimension}.csv`,
-                );
+                return sendReport(await client.getPerformance(options), 'performance-' + options.dimension + '.csv');
             }
             if (route === 'GET /search-console/time-gaps') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 return sendJson(200, await client.getPerformanceTimeGaps(performanceOptions()));
             }
             if (route === 'GET /search-console/summary') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 return sendJson(200, await client.getSearchConsoleSummary({
                     property: url.searchParams.get('property') || undefined,
                     period: url.searchParams.get('period') || '28-days',
                 }));
             }
             if (route === 'GET /search-console/notifications') {
-                await ensureSearchConsole();
-                return sendJson(200, await client.getNotifications());
+                await ensureBrowser();
+                return sendJson(200, await client.getNotifications({ property: url.searchParams.get('property') || undefined }));
             }
             if (route === 'GET /search-console/links') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 const report = await client.getLinks({
                     property: url.searchParams.get('property') || undefined,
-                    maxPages: integerParam(url.searchParams, 'maxPages', 500),
+                    maxPages: integerParam(url.searchParams, 'maxPages', 500, 1, 500),
                 });
                 return sendJson(report.complete ? 200 : 206, report);
             }
             if (route === 'GET /search-console/url-inspection') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 const inspectedUrl = url.searchParams.get('url');
                 if (!inspectedUrl) throw new TypeError('url is required');
                 return sendJson(200, await client.inspectUrl(inspectedUrl, {
@@ -336,38 +251,24 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                 }));
             }
             if (route === 'POST /search-console/url-inspection') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 if (!body.url) throw new TypeError('url is required');
                 return sendJson(200, await client.inspectUrl(body.url, {
                     property: body.property,
                     action: body.action,
                 }));
             }
-            if (route === 'GET /search-console/sitemaps') {
-                await ensureSearchConsole();
-                return sendJson(200, await client.getSearchConsoleReport({
-                    report: 'sitemaps',
-                    property: url.searchParams.get('property') || undefined,
-                    allPages: booleanParam(url.searchParams, 'allPages'),
-                    maxPages: integerParam(url.searchParams, 'maxPages', 50),
-                }));
-            }
             if (route === 'POST /search-console/sitemaps') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 if (!body.sitemap) throw new TypeError('sitemap is required');
                 return sendJson(200, await client.submitSitemap(body.sitemap, { property: body.property }));
             }
-            if (route === 'GET /search-console/indexing' || route === 'GET /search-console/validations') {
-                await ensureSearchConsole();
-                return sendJson(200, await client.getSearchConsoleReport({
-                    report: 'indexing',
-                    property: url.searchParams.get('property') || undefined,
-                    allPages: booleanParam(url.searchParams, 'allPages'),
-                    maxPages: integerParam(url.searchParams, 'maxPages', 50),
-                }));
+            if (route === 'GET /search-console/validations') {
+                await ensureBrowser();
+                return sendReport(await client.getReport('search-console', { ...reportOptions(), report: 'indexing' }), 'indexing.csv');
             }
             if (route === 'GET /search-console/indexing/pages' || route === 'GET /search-console/indexing/pages.csv') {
-                await ensureSearchConsole();
+                await ensureBrowser();
                 const report = await client.getIndexingPages(indexingPagesOptions());
                 if (route.endsWith('.csv')) {
                     if (!report.complete) {
@@ -382,130 +283,50 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
                 }
                 return sendJson(report.complete ? 200 : 206, report);
             }
-            if (route === 'POST /search-console/control' || route === 'POST /search-console/filter') {
-                await ensureSearchConsole();
-                return sendJson(200, await client.controlSearchConsole(body));
+            if (route === 'GET /google-ads/accounts') {
+                await ensureBrowser('google-ads');
+                return sendJson(200, await client.getGoogleAdsAccounts());
             }
-            const adsReport = url.pathname.match(/^\/google-ads\/([^/]+?)(\.csv)?$/);
-            const isAdsReport = request.method === 'GET' && adsReport &&
-                (adsReport[1] === 'report' || Object.hasOwn(GoogleAdsReports, adsReport[1]));
-            if (isAdsReport || [
-                'GET /google-ads/accounts', 'GET /google-ads/state', 'GET /google-ads/navigation',
-                'POST /google-ads/account', 'POST /google-ads/control', 'POST /google-ads/filter',
-                'POST /google-ads/keyword-ideas', 'POST /google-ads/keyword-forecast',
-            ].includes(route)) {
-                const allPages = booleanParam(url.searchParams, 'allPages', Boolean(adsReport?.[2]));
-                const maxPages = integerParam(url.searchParams, 'maxPages', 50);
-                if (maxPages < 1 || maxPages > 500) throw new TypeError('maxPages must be between 1 and 500');
-                const table = integerParam(url.searchParams, 'table', 0);
-                if (table < 0) throw new TypeError('table must not be negative');
-                const allowPartial = booleanParam(url.searchParams, 'allowPartial');
-                if (route === 'POST /google-ads/account' && (typeof body.url !== 'string' || !body.url)) {
-                    throw new TypeError('url is required; use an account link returned by /google-ads/accounts');
-                }
-                if (starting) await starting;
-                if (!client.pupBrowser) await start('google-ads');
-                if (route === 'GET /google-ads/accounts') return sendJson(200, await client.getGoogleAdsAccounts());
-                if (route === 'GET /google-ads/state') return sendJson(200, await client.getGoogleAdsState());
-                if (route === 'GET /google-ads/navigation') {
-                    const report = await client.getGoogleAdsReport({ report: 'current' });
-                    return sendJson(200, { url: report.url, account: report.account, links: report.links.filter(({ url }) => {
-                        const target = new URL(url);
-                        return target.protocol === 'https:' && target.hostname === 'ads.google.com' && target.pathname.startsWith('/aw/');
-                    }) });
-                }
-                if (route === 'POST /google-ads/control' || route === 'POST /google-ads/filter') {
-                    return sendJson(200, await client.controlGoogleAds(body));
-                }
-                if (route === 'POST /google-ads/keyword-ideas' || route === 'POST /google-ads/keyword-forecast') {
-                    const report = await client.planGoogleAdsKeywords({ ...body, mode: route.endsWith('keyword-ideas') ? 'ideas' : 'forecast' });
-                    return sendJson(report.complete === false ? 206 : 200, report);
-                }
-                const report = await client.getGoogleAdsReport({
-                    report: adsReport?.[1] === 'report' ? (url.searchParams.get('report') || 'overview') : adsReport?.[1],
-                    path: route === 'POST /google-ads/account' ? body.url : url.searchParams.get('path') || undefined,
-                    allPages,
-                    maxPages,
-                });
-                if (adsReport?.[2]) {
-                    if (report.complete !== true && !allowPartial) {
-                        return sendJson(409, { error: 'Cannot verify a complete export. Inspect the JSON report, or set allowPartial=true to export rendered rows.' });
-                    }
-                    return sendCsv(toCsv(report, table), `google-ads-${adsReport[1]}.csv`);
-                }
-                return sendJson(report.complete === false ? 206 : 200, report);
+            if (route === 'POST /google-ads/keyword-ideas' || route === 'POST /google-ads/keyword-forecast') {
+                await ensureBrowser('google-ads');
+                return sendReport(await client.planGoogleAdsKeywords({
+                    ...body, mode: action === 'keyword-ideas' ? 'ideas' : 'forecast',
+                }), 'keyword-planner.csv');
             }
-            const merchantReport = url.pathname.match(/^\/merchant-center\/([^/]+?)(\.csv)?$/);
-            const isMerchantReport = request.method === 'GET' && merchantReport &&
-                (merchantReport[1] === 'report' || Object.hasOwn(MerchantCenterReports, merchantReport[1]));
-            if (isMerchantReport || [
-                'GET /merchant-center/state', 'GET /merchant-center/navigation',
-                'POST /merchant-center/navigate', 'POST /merchant-center/control', 'POST /merchant-center/filter',
-            ].includes(route)) {
-                const allPages = booleanParam(url.searchParams, 'allPages', Boolean(merchantReport?.[2]));
-                const maxPages = integerParam(url.searchParams, 'maxPages', 50);
-                if (maxPages < 1 || maxPages > 500) throw new TypeError('maxPages must be between 1 and 500');
-                const table = integerParam(url.searchParams, 'table', 0);
-                if (table < 0) throw new TypeError('table must not be negative');
-                if (route === 'POST /merchant-center/navigate' && typeof body.target !== 'string') {
-                    throw new TypeError('target is required and must be a Merchant Center path or URL');
+            const namedReport = config && Object.hasOwn(config.reports || { overview: '' }, action);
+            const genericRead = config && request.method === 'GET' &&
+                !(service === 'pagespeed' && action === 'report') &&
+                (action === 'report' || namedReport || (!serviceRoute[3] && ['state', 'navigation'].includes(action)));
+            const genericWrite = config && request.method === 'POST' && !serviceRoute[3] &&
+                (['navigate', 'control', 'filter'].includes(action) || (service === 'google-ads' && action === 'account'));
+            if (genericRead || genericWrite) {
+                const options = reportOptions();
+                if (genericRead) {
+                    integerParam(url.searchParams, 'table', 0);
+                    booleanParam(url.searchParams, 'allowPartial');
+                } else if (['navigate', 'account'].includes(action) && typeof (body.target ?? body.url) !== 'string') {
+                    throw new TypeError('target is required and must be a path or URL within this service');
                 }
-                if (starting) await starting;
-                if (!client.pupBrowser) await start('merchant-center');
-                if (route === 'GET /merchant-center/state') return sendJson(200, await client.getMerchantCenterState());
-                if (route === 'GET /merchant-center/navigation') return sendJson(200, await client.getMerchantCenterNavigation());
-                if (route === 'POST /merchant-center/navigate') return sendJson(200, await client.open(body.target));
-                if (route === 'POST /merchant-center/control' || route === 'POST /merchant-center/filter') {
-                    return sendJson(200, await client.controlMerchantCenter(body));
+                await ensureBrowser(service);
+                if (action === 'state') return sendJson(200, await client.getServiceState(service, stateOptions()));
+                if (action === 'navigation') return sendJson(200, await client.getNavigation(service));
+                if (action === 'control' || action === 'filter') return sendJson(200, await client.control(service, body));
+                if (action === 'navigate' || action === 'account') {
+                    return sendJson(200, await client.navigate(service, body.target ?? body.url));
                 }
-                const report = await client.getMerchantCenterReport({
-                    report: merchantReport[1] === 'report' ? (url.searchParams.get('report') || 'overview') : merchantReport[1],
-                    path: url.searchParams.get('path') || undefined,
-                    allPages,
-                    maxPages,
-                });
-                if (merchantReport[2]) {
-                    if (report.complete !== true && !booleanParam(url.searchParams, 'allowPartial')) {
-                        return sendJson(409, { error: 'Cannot verify a complete export. Inspect the JSON report, or set allowPartial=true to export rendered rows.' });
-                    }
-                    return sendCsv(toCsv(report, table), `merchant-center-${merchantReport[1]}.csv`);
-                }
-                return sendJson(report.complete === false ? 206 : 200, report);
+                return sendReport(await client.getReport(service, {
+                    ...options, report: action === 'report' ? options.report : action,
+                }), service + '-' + action + '.csv');
             }
             if (route === 'GET /pagespeed/report' || route === 'GET /pagespeed/report.csv') {
                 const target = url.searchParams.get('url');
                 if (!target) throw new TypeError('url is required');
-                const requestedCategories = url.searchParams.getAll('category')
-                    .flatMap((category) => category.split(',')).filter(Boolean);
-                const strategy = url.searchParams.get('strategy') || 'mobile';
-                let report;
-                try {
-                    report = await client.getPageSpeedReport(target, {
-                        strategy,
-                        categories: requestedCategories.length
-                            ? requestedCategories
-                            : ['performance', 'accessibility', 'best-practices', 'seo'],
-                        locale: url.searchParams.get('locale') || 'en',
-                        apiKey: process.env.PAGESPEED_API_KEY,
-                        raw: booleanParam(url.searchParams, 'raw'),
-                    });
-                } catch (error) {
-                    if (![403, 429].includes(error.status)) throw error;
-                    await ensureSearchConsole();
-                    report = await client.getPageSpeedWebReport(target, { strategy });
-                    report.apiError = error.message;
-                }
+                await ensureBrowser('pagespeed');
+                const report = await client.getPageSpeedReport(target, { strategy: url.searchParams.get('strategy') || 'mobile' });
                 if (route.endsWith('.csv')) {
                     return sendCsv(toCsv({ tables: [{
-                        headers: ['ID', 'Title', 'Score', 'Display value', 'Numeric value', 'Unit'],
-                        rows: report.audits.map((audit) => [
-                            audit.id,
-                            audit.title,
-                            audit.score,
-                            audit.displayValue,
-                            audit.numericValue,
-                            audit.numericUnit,
-                        ]),
+                        headers: ['ID', 'Title'],
+                        rows: report.audits.map((audit) => [audit.id, audit.title]),
                     }] }), `pagespeed-${report.strategy}.csv`);
                 }
                 return sendJson(200, report);
@@ -522,13 +343,12 @@ function createApiServer(client, { apiKey, googleApiClient = new GoogleApiClient
 
 async function main() {
     const Client = require('./src/Client');
-    const LocalAuth = require('./src/authStrategies/LocalAuth');
-    const port = Number(process.env.GOOGLE_SEO_API_PORT || 3100);
+    const port = Number(process.env.PORT || process.env.GOOGLE_SEO_API_PORT || 3100);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error('GOOGLE_SEO_API_PORT must be an integer between 1 and 65535');
+        throw new Error('PORT must be an integer between 1 and 65535');
     }
-    const client = new Client({ authStrategy: new LocalAuth() });
-    const server = createApiServer(client, { apiKey: process.env.GOOGLE_SEO_API_KEY });
+    const client = new Client();
+    const server = createApiServer(client, { apiKey: process.env.API_KEY || process.env.GOOGLE_SEO_API_KEY });
     server.listen(port, '127.0.0.1', () => {
         console.log(`Google Tools Manager ready at http://127.0.0.1:${port}`);
         console.log('Use POST /auth/login with JSON {} to open Search Console.');

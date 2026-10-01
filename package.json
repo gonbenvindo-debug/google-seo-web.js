@@ -4,7 +4,8 @@
   "description": "Local API and browser controller for Google Search Console, Google Ads, AdSense, Merchant Center and SEO tools",
   "main": "./index.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --watch --env-file-if-exists=.env server.js",
     "test": "node --test"
   },
   "keywords": [

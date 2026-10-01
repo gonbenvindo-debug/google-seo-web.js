@@ -1,42 +1,5 @@
 'use strict';
 
-exports.LoginURL = 'https://accounts.google.com/ServiceLogin?service=sitemaps&continue=https://search.google.com/search-console/';
-
-exports.Services = Object.freeze({
-    'search-console': {
-        name: 'Google Search Console',
-        url: 'https://search.google.com/search-console/',
-    },
-    'google-ads': {
-        name: 'Google Ads',
-        url: 'https://ads.google.com/aw/overview',
-    },
-    pagespeed: {
-        name: 'PageSpeed Insights',
-        url: 'https://pagespeed.web.dev/',
-    },
-    'rich-results': {
-        name: 'Rich Results Test',
-        url: 'https://search.google.com/test/rich-results',
-    },
-    'merchant-center': {
-        name: 'Google Merchant Center',
-        url: 'https://merchants.google.com/',
-    },
-    'search-docs': {
-        name: 'Google Search Central',
-        url: 'https://developers.google.com/search/',
-    },
-    'schema-validator': {
-        name: 'Schema.org Validator',
-        url: 'https://validator.schema.org/',
-    },
-    trends: {
-        name: 'Google Trends',
-        url: 'https://trends.google.com/trends/',
-    },
-});
-
 exports.SearchConsoleReports = Object.freeze({
     overview: '',
     insights: 'performance/insights',
@@ -90,28 +53,50 @@ exports.GoogleAdsReports = Object.freeze({
 });
 
 exports.MerchantCenterReports = Object.freeze({
-    overview: '',
-    products: 'products',
+    overview: 'overview',
+    products: 'items',
     diagnostics: 'products/diagnostics',
-    performance: 'analytics',
-    marketing: 'marketing',
-    campaigns: 'marketing/campaigns',
+    performance: 'reporting/performance/summary',
+    marketing: 'marketingmethods',
+    campaigns: 'campaigns',
     promotions: 'promotions',
-    'data-sources': 'data-sources',
-    'shipping-returns': 'shipping-and-returns',
-    notifications: 'notifications',
-    settings: 'settings',
+    'data-sources': 'products/sources',
+    'shipping-returns': 'shipping/services',
+    notifications: 'taskhub',
+    settings: 'accountprefs',
+});
+
+exports.Services = Object.freeze({
+    'search-console': {
+        name: 'Google Search Console', url: 'https://search.google.com/search-console/',
+        login: true, reports: exports.SearchConsoleReports,
+    },
+    'google-ads': {
+        name: 'Google Ads', url: 'https://ads.google.com/aw/', home: 'overview',
+        login: true, reports: exports.GoogleAdsReports,
+        paths: ['/aw/', '/nav/selectaccount'], context: ['euid', 'ocid', 'authuser'],
+    },
+    'merchant-center': {
+        name: 'Google Merchant Center', url: 'https://merchants.google.com/mc/', home: 'overview',
+        login: true, reports: exports.MerchantCenterReports, context: ['a', 'account', 'accountId', 'authuser'],
+    },
+    analytics: {
+        name: 'Google Analytics', url: 'https://analytics.google.com/analytics/web/',
+        login: true, context: ['authuser'],
+    },
+    adsense: {
+        name: 'Google AdSense', url: 'https://adsense.google.com/adsense/', login: true,
+    },
+    pagespeed: { name: 'PageSpeed Insights', url: 'https://pagespeed.web.dev/' },
+    'rich-results': { name: 'Rich Results Test', url: 'https://search.google.com/test/rich-results' },
+    'search-docs': { name: 'Google Search Central', url: 'https://developers.google.com/search/' },
+    'schema-validator': { name: 'Schema.org Validator', url: 'https://validator.schema.org/' },
+    trends: { name: 'Google Trends', url: 'https://trends.google.com/trends/' },
 });
 
 exports.AllowedHosts = new Set([
-    'ads.google.com',
-    'search.google.com',
-    'pagespeed.web.dev',
-    'merchants.google.com',
-    'developers.google.com',
+    ...Object.values(exports.Services).map(({ url }) => new URL(url).hostname),
     'support.google.com',
-    'validator.schema.org',
-    'trends.google.com',
 ]);
 
 exports.Events = Object.freeze({
