@@ -530,7 +530,7 @@ async function main() {
     const client = new Client({ authStrategy: new LocalAuth() });
     const server = createApiServer(client, { apiKey: process.env.GOOGLE_SEO_API_KEY });
     server.listen(port, '127.0.0.1', () => {
-        console.log(`Google SEO API ready at http://127.0.0.1:${port}`);
+        console.log(`Google Tools Manager ready at http://127.0.0.1:${port}`);
         console.log('Use POST /auth/login with JSON {} to open Search Console.');
     });
     const close = () => server.close(() => client.destroy());

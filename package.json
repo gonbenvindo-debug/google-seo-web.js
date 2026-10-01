@@ -1,7 +1,7 @@
 {
-  "name": "google-seo-web.js",
+  "name": "google-tools-manager",
   "version": "0.2.0",
-  "description": "Local browser controller for Google Search Console, Google Ads and SEO tools",
+  "description": "Local API and browser controller for Google Search Console, Google Ads, AdSense, Merchant Center and SEO tools",
   "main": "./index.js",
   "scripts": {
     "start": "node server.js",
@@ -15,7 +15,7 @@
     "puppeteer",
     "llm"
   ],
-  "repository": "github:gonbenvindo-debug/google-seo-web.js",
+  "repository": "github:gonbenvindo-debug/google-tools-manager",
   "license": "MIT",
   "engines": {
     "node": ">=22.12.0"

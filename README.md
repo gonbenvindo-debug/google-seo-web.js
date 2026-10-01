@@ -1,6 +1,6 @@
-# google-seo-web.js
+# Google Tools Manager
 
-`google-seo-web.js` is a local Node.js API and browser controller for Google Search Console, Google Ads, PageSpeed Insights, and other Google SEO tools.
+Google Tools Manager is a local Node.js API and browser controller for Google Search Console, Google Ads, AdSense, Merchant Center, PageSpeed Insights, and other Google tools.
 
 It keeps a persistent Chromium session, lets you complete Google login manually, and exposes JSON and CSV endpoints for reports, indexing, sitemaps, URL inspection, PageSpeed, and browser control.
 
@@ -214,7 +214,7 @@ GET /pagespeed/report?url=https%3A%2F%2Fexample.com%2F&strategy=mobile
 ## Library usage
 
 ```js
-const { Client, LocalAuth } = require('google-seo-web.js');
+const { Client, LocalAuth } = require('google-tools-manager');
 
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'my-project' }),
